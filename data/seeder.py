@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from config import RUNTIME_DIR, settings  # noqa: E402
+from fleet.catalog import get_catalog  # noqa: E402
 from memory.bank_schemas import RepairRecord, bank_schema, load_seed, records_from_seed, resolve_bank_id  # noqa: E402
+from memory.field_notes import seed_notes  # noqa: E402
 from memory.event_log import EventLog  # noqa: E402
 from memory.fallback_store import LocalMemoryStore  # noqa: E402
 from memory.hindsight_wrapper import HindsightError, HindsightMemory  # noqa: E402
@@ -41,12 +43,14 @@ def plan(records: list[RepairRecord], base: str, per_fleet: bool) -> dict[str, l
 
 
 async def seed(args: argparse.Namespace) -> int:
-    records = records_from_seed(load_seed())
+    notes = seed_notes(get_catalog())
+    records = notes if args.notes_only else records_from_seed(load_seed()) + notes
     if args.limit:
         records = records[: args.limit]
     banks = plan(records, args.bank, settings.hindsight_per_fleet_banks)
 
-    print(f"Seed history: {len(records)} repair records → {', '.join(f'{b} ({len(r)})' for b, r in banks.items())}")
+    kinds = f"{sum(r.record_type == 'repair' for r in records)} repair records, {sum(r.record_type == 'note' for r in records)} field notes"
+    print(f"Seed history: {kinds} → {', '.join(f'{b} ({len(r)})' for b, r in banks.items())}")
     if args.dry_run:
         sample = next(iter(banks.values()))[0].to_retain_item()
         print("\nDry run: no network calls. First retain item:\n")
@@ -77,7 +81,7 @@ async def seed(args: argparse.Namespace) -> int:
             for i in range(0, len(bank_records), args.batch_size):
                 batch = bank_records[i : i + args.batch_size]
                 result = await memory.retain_records(
-                    bank_id, batch, journal=False, timeout_s=args.timeout, retry_in_background=False,
+                    bank_id, batch, journal=False, timeout_s=args.timeout,
                     retries=4, async_=not args.sync,
                 )
                 span = f"{batch[0].occurred_at[:10]} → {batch[-1].occurred_at[:10]}"
@@ -150,6 +154,8 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per batch request")
     parser.add_argument("--sync", action="store_true", help="wait for extraction on each batch")
     parser.add_argument("--limit", type=int, default=0, help="only seed the first N records")
+    parser.add_argument("--notes-only", action="store_true",
+                        help="only seed the technicians' field notes (site rules, hazards, equipment quirks)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and a sample payload without calling Hindsight")
     parser.add_argument("--no-wait", action="store_true", help="return as soon as batches are queued")
     parser.add_argument("--wait-timeout", type=float, default=900.0, help="seconds to wait for background extraction")

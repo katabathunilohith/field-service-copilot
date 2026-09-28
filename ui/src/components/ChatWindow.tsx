@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, formatDate } from "../api";
 import type { AgentRun, Catalog, CitationReport, MemoryDelta, Mode, RetainResult, StreamEvent, ToolTrace, ViewMode } from "../types";
 import { Badge, Icon, Markdown, OutcomeBadge, Spinner, statusTone } from "./ui";
+import SiteBriefing from "./SiteBriefing";
 import VoiceButton from "./VoiceButton";
 
 type Outcome = { state: "saving" | "done" | "error"; held?: boolean; retain?: RetainResult; error?: string };
@@ -98,6 +99,16 @@ function applyEvent(live: Live, e: StreamEvent): Live {
         }),
       };
     }
+    case "briefing":
+      return {
+        ...live,
+        steps: upsert(steps, {
+          key: "briefing",
+          label: e.data.count ? `Site briefing: ${e.data.count} field note${e.data.count === 1 ? "" : "s"}` : "Site briefing: no field notes yet",
+          detail: e.data.count ? (e.data.source === "hindsight" ? "Hindsight" : "local memory") : e.data.site,
+          state: e.data.count ? "done" : "info",
+        }),
+      };
     case "llm":
       return { ...live, steps: upsert(steps, { key: "llm", label: `Reasoning with ${e.data.model}`, detail: e.data.round > 1 ? `round ${e.data.round}` : undefined, state: "running" }) };
     case "llm_wait":
@@ -121,7 +132,10 @@ export default function ChatWindow({ catalog, voiceEnabled, onRun, onMemoryChang
   const [threads, setThreads] = useState<Threads>({ baseline: [], copilot: [] });
   const [live, setLive] = useState<Record<Mode, Live | null>>({ baseline: null, copilot: null });
   const [notice, setNotice] = useState<string | null>(null);
+  const [detectedUnit, setDetectedUnit] = useState<string | null>(null);
+  const [notesKey, setNotesKey] = useState(0);
   const lastPrefetch = useRef("");
+  const briefingUnit = unit || detectedUnit;
 
   const busy = live.baseline !== null || live.copilot !== null;
   const panes: Mode[] = view === "compare" ? ["baseline", "copilot"] : [view];
@@ -140,7 +154,7 @@ export default function ChatWindow({ catalog, voiceEnabled, onRun, onMemoryChang
     const timer = window.setTimeout(() => {
       if (key === lastPrefetch.current) return;
       lastPrefetch.current = key;
-      void api.prefetch(text.trim(), technician, unit || null);
+      void api.prefetch(text.trim(), technician, unit || null).then((r) => r.parsed?.unit_id && setDetectedUnit(r.parsed.unit_id));
     }, 700);
     return () => window.clearTimeout(timer);
   }, [text, unit, technician, view]);
@@ -272,6 +286,19 @@ export default function ChatWindow({ catalog, voiceEnabled, onRun, onMemoryChang
           </button>
         )}
       </div>
+
+      {briefingUnit && (
+        <SiteBriefing
+          unitId={briefingUnit}
+          technicianId={technician}
+          voiceEnabled={voiceEnabled}
+          refreshKey={notesKey}
+          onSaved={() => {
+            setNotesKey((k) => k + 1);
+            onMemoryChanged();
+          }}
+        />
+      )}
 
       {/* Panes */}
       <div className={`grid min-h-0 flex-1 gap-3 ${panes.length === 2 ? "lg:grid-cols-2" : ""}`}>
@@ -572,6 +599,12 @@ function RecallStrip({ run, onInspect }: { run: AgentRun; onInspect: () => void 
         {mem.hits.length} memories · {mem.source === "hindsight" ? "Hindsight" : mem.source === "mixed" ? "mixed" : "local fallback"} ·{" "}
         {recallMs} ms{cached ? " · prefetched" : ""}
       </Badge>
+      {mem.briefing && mem.briefing.items.length > 0 && (
+        <Badge tone="accent" title={mem.briefing.items.map((n) => n.text).join("\n")}>
+          <Icon name="shield" className="size-3" />
+          {mem.briefing.items.length} field note{mem.briefing.items.length === 1 ? "" : "s"}
+        </Badge>
+      )}
       {mem.reflection && (
         <Badge tone={mem.reflection.source === "hindsight" ? "good" : "neutral"} title={mem.reflection.trigger}>
           <Icon name="spark" className="size-3" />

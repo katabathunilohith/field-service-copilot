@@ -36,7 +36,9 @@ from config import Settings, settings
 from main import build_services, create_app
 from memory.bank_schemas import RepairRecord, load_seed, now_iso, records_from_seed
 from memory.event_log import EventLog
+from fleet.catalog import get_catalog
 from memory.fallback_store import LocalMemoryStore
+from memory.field_notes import screen_note, seed_notes
 from memory.hindsight_wrapper import RETAIN_RETRIES, HindsightMemory
 
 QUERY_B = (
@@ -59,7 +61,9 @@ class MockHindsight:
         self.slow_recall_s = slow_recall_s
         self.retain_latency_s = retain_latency_s
         self.fail_retains = False
-        self.store = LocalMemoryStore(records_from_seed(load_seed()), Path(tempfile.mkdtemp()) / "mock.jsonl")
+        # A seeded bank: the repair history plus the technicians' seeded field notes.
+        self.store = LocalMemoryStore(records_from_seed(load_seed()) + seed_notes(get_catalog()),
+                                      Path(tempfile.mkdtemp()) / "mock.jsonl")
         self.retained: list[dict[str, Any]] = []
         self.directives: list[dict[str, Any]] = []
         self.calls: list[str] = []
@@ -80,7 +84,15 @@ class MockHindsight:
     def _retain(self, body: dict[str, Any], bank: str) -> dict[str, Any]:
         for item in body["items"]:
             meta = item["metadata"]
-            if meta.get("record_type") in ("repair", "diagnosis", "outcome"):
+            if meta.get("record_type") == "note":
+                self.store.add(RepairRecord(
+                    record_id=item["document_id"], record_type="note", occurred_at=meta["occurred_at"],
+                    technician_id=meta["technician"], technician_role=meta["technician_role"], unit_id=meta["unit_id"],
+                    site=meta["site"], model_key=meta["model"], model_name="", fleet="", error_code="", error_title="",
+                    action_taken="", action_category="unknown", outcome_held=None, root_cause="",
+                    notes=meta["note_text"], note_kind=meta["note_kind"],
+                ))
+            elif meta.get("record_type") in ("repair", "diagnosis", "outcome"):
                 self.store.add(RepairRecord(
                     record_id=item["document_id"], record_type=meta["record_type"], occurred_at=meta["occurred_at"],
                     technician_id=meta["technician"], technician_role=meta["technician_role"], unit_id=meta["unit_id"],
@@ -175,7 +187,8 @@ class ScriptedGroq(GroqClient):
         messages, tool_choice = kwargs["messages"], kwargs.get("tool_choice")
         kind = ("work order" if isinstance(tool_choice, dict)
                 else "copilot" if "Field Service Copilot" in messages[0]["content"] else "baseline")
-        self.requests.append({"kind": kind, "tools": [t["function"]["name"] for t in kwargs.get("tools") or []]})
+        self.requests.append({"kind": kind, "tools": [t["function"]["name"] for t in kwargs.get("tools") or []],
+                              "context": messages[1]["content"]})
         match = _UNIT_IN_PROMPT.search(messages[1]["content"])  # the CONTEXT, or the work-order prompt
         unit = match.group(1) if match else "CHL-0417"
 
@@ -576,6 +589,68 @@ def test_stream_reports_retain() -> None:
     asyncio.run(run())
 
 
+def test_field_notes_briefing() -> None:
+    print("\n[12] Field notes: one technician's site knowledge briefs the next visit")
+    screened = screen_note("Gate code is 4471#. Call +1 (555) 201-4478. Torque J4 to 2.5 N·m; pin 3; 0.35-0.45 mm.")
+    check("4471" not in screened.text and "201-4478" not in screened.text,
+          f"access codes and phone numbers are redacted: {screened.redactions}")
+    check(all(x in screened.text for x in ("2.5 N·m", "pin 3", "0.35-0.45 mm")), "sizes, torques and pin numbers survive")
+
+    async def run() -> None:
+        app, services, mock = build_offline_app()
+        async with running(app) as client:
+            async def briefing(unit: str) -> dict[str, Any]:
+                return (await client.get("/api/briefing", params={"unit_id": unit})).json()
+
+            check((await briefing("CHL-0417"))["items"] == [], "CHL-0417 at Riverside Medical starts with an empty briefing")
+
+            resp = await client.post("/api/notes", json={
+                "text": "Tower B roof needs a facilities escort after 6pm. Gate code is 4471#.",
+                "technician_id": "Tech_Alex", "unit_id": "CHL-0417", "scope": "site", "kind": "site_rule"})
+            saved = resp.json()
+            check(resp.status_code == 200 and saved["retain"]["status"] == "queued" and saved["note"]["scope"] == "site",
+                  "Tech_Alex's site rule retained to Hindsight (site-wide)")
+            check(saved["redactions"] and "4471" not in json.dumps(mock.retained),
+                  "the gate code never reached shared memory")
+            quirk = await client.post("/api/notes", json={
+                "text": "VFD cabinet door hinge is seized; bring a 10 mm socket.",
+                "technician_id": "Tech_Alex", "unit_id": "CHL-0417"})
+            check(quirk.json()["note"]["kind"] == "machine_quirk" and quirk.json()["note"]["scope"] == "unit",
+                  "kind inferred as an equipment quirk, pinned to CHL-0417")
+
+            mine = await briefing("CHL-0417")
+            check([i["kind"] for i in mine["items"]] == ["site_rule", "machine_quirk"]
+                  and {i["technician"] for i in mine["items"]} == {"Tech_Alex"} and mine["source"] == "hindsight",
+                  "CHL-0417 briefing now holds both, credited to Tech_Alex, recalled from Hindsight")
+            other = await briefing("ELV-0302")  # another unit at Riverside Medical
+            check(["escort" in i["text"] for i in other["items"]] == [True],
+                  "the site rule reaches every unit at Riverside; the chiller quirk stays with CHL-0417")
+            check(all("Harbor" not in i["text"] and "Coastal" not in i["text"] for i in mine["items"]),
+                  "notes from other sites do not leak in")
+            mesa = await briefing("INV-3112")
+            check([i["kind"] for i in mesa["items"]] == ["hazard", "machine_quirk"],
+                  f"seeded knowledge: Mesa Ridge briefing leads with the heat hazard, then the INV-3112 quirk")
+
+            resp = await client.post("/api/diagnose/stream", json={"query": QUERY_B.replace("Tech_Alex", "Tech_Sarah"),
+                                                                    "technician_id": "Tech_Sarah", "mode": "copilot"})
+            events = sse_events(resp.text)
+            brief = next(data for name, data in events if name == "briefing")
+            check(brief["count"] == 2 and brief["source"] == "hindsight",
+                  "Tech_Sarah's diagnosis on CHL-0417 streams the 2-note briefing before reasoning")
+            contexts = [r["context"] for r in services.llm.requests if r["kind"] == "copilot"]
+            check(any("FIELD NOTES FROM TECHNICIANS" in c and "escort" in c and "Tech_Alex" in c for c in contexts),
+                  "the notes, credited to Tech_Alex, are in the Copilot's context")
+            check(events[-1][1]["run"]["memory"]["briefing"]["items"][0]["kind"] == "site_rule",
+                  "the run payload carries the briefing for the UI")
+
+            bad = await client.post("/api/notes", json={"text": "code 4471", "technician_id": "Tech_Alex", "unit_id": "CHL-0417"})
+            check(bad.status_code == 422, "a note that is only a code is rejected, not stored")
+            unknown = await client.post("/api/notes", json={"text": "Roof hatch sticks in the cold.", "technician_id": "Tech_Alex", "unit_id": "XYZ-0001"})
+            check(unknown.status_code == 422, "unknown units are rejected")
+
+    asyncio.run(run())
+
+
 def test_bulletin_publish() -> None:
     print("\n[9] Service bulletin: drafted by structured reflect, approved into memory and a scoped directive")
 
@@ -691,7 +766,7 @@ def main() -> None:
     tests = [
         test_json_repair, test_citations, test_token_bucket, test_recall_timeout_falls_back, test_slow_retain_lands,
         test_retain_outage, test_end_to_end_learning_loop, test_stream_reports_retain, test_bulletin_publish,
-        test_metrics_learning_curve, test_fully_degraded,
+        test_metrics_learning_curve, test_fully_degraded, test_field_notes_briefing,
     ]
     failed = 0
     for test in tests:

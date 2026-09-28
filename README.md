@@ -13,6 +13,7 @@ A diagnostic copilot for technicians repairing commercial HVAC chillers, solar i
 | **Closed learning loop** | Every Copilot session opens a ticket and is retained. **Fix held / Didn't hold** retains the outcome, and the next technician's statistics move. |
 | **Memory Inspector** | A slide-over with recalled memories (score, date, technician, outcome), the retain event log with raw payloads, reflection synthesis (auto-triggered or on demand), and every raw request/response. |
 | **Fleet learning** | First-time-fix by week, memory density, a peer-learning ledger (who discovered what and who later benefited), and per-technician first-time-fix. |
+| **Field notes & "Before you go" briefing** | Tribal knowledge that isn't a repair outcome: site access rules, hazards and equipment quirks ("Tower B roof needs an escort after 6pm", "bring the long MC4 tool"). Technicians type or speak a note; it is retained to Hindsight, scoped to the unit or the whole site. Selecting a unit shows every note for it and its site, credited and dated, before a question is asked, and the Copilot opens its procedure with the relevant hazards and rules. Access codes, passwords, phone numbers and emails are redacted before anything is saved. |
 
 ## Quick start
 
@@ -36,7 +37,7 @@ pip install -r requirements.txt
 npm install
 ```
 
-Seed the Hindsight bank with the 4-week service history (88 repair records). Re-running is idempotent.
+Seed the Hindsight bank with the 4-week service history (88 repair records and 7 field notes). Re-running is idempotent; `--notes-only` sends just the field notes.
 
 ```bash
 python data/seeder.py
@@ -140,6 +141,7 @@ The bank profile (`PUT /v1/default/banks/{id}`) sets a mission, background, reta
 ## Data (`data/`)
 
 * `equipment_catalog.json` holds three models, eight error codes with OEM manual sections, 24 units across seven sites, telemetry baselines, and live anomaly profiles for the demo units.
+* `field_notes_seed.json` has 7 technicians' field notes across four sites. Riverside Medical has none, so the demo can start from an empty briefing.
 * `seed_history.json` has 72 work orders (88 technician visits) from 31 Aug to 27 Sept 2026. It is generated deterministically by `python data/generate_seed.py`, where the schedule is scripted and readable.
 * It includes honest misses: a genuine board failure where the harness was fine, a site-dependent `GF-17` variant, a senior tech who skipped the Copilot, and ordinary control-case failures.
 
@@ -157,6 +159,8 @@ All data is synthetic. Model names are used for realism; error codes, part numbe
 | `GET` | `/api/memory/events` | Memory operation log for the inspector (`?op=recall\|retain\|reflect`) |
 | `POST` | `/api/memory/reflect` | `{model, error_code, force}`; on-demand reflection |
 | `GET` | `/api/metrics/fleet` | Weekly first-time-fix, memory density, peer-learning ledger, per-technician stats |
+| `POST` | `/api/notes` | `{text, technician_id, unit_id, scope: unit\|site, kind?: site_rule\|hazard\|machine_quirk}`; screens, then retains a field note |
+| `GET` | `/api/briefing?unit_id=` | Pre-visit briefing: field notes for the unit and its site, recalled from Hindsight |
 
 `npm run build` writes `ui/dist`; when that folder exists, `python main.py` also serves the UI at http://localhost:8000.
 
@@ -174,3 +178,11 @@ test_workflow.py           end-to-end check (offline by default, --live for real
 ```
 
 Runtime state (tickets and the retain journal) is written to `data/runtime/`, which is git-ignored. Delete it to reset live sessions.
+
+## Demo: tribal knowledge in 60 seconds
+
+1. As **Tech_Alex**, select **CHL-0417**. The "Before you go" strip is empty: nobody has noted anything about Riverside Medical.
+2. **+ Add field note** → *Site rule*, *Whole site*: "Tower B roof needs a facilities escort after 6pm." (or tap the mic). Add an *Equipment quirk* for this unit: "VFD cabinet hinge is seized; bring a 10 mm socket."
+3. Switch the technician to **Tech_Sarah** and select **ELV-0302**, a lift at the same hospital: the escort rule is already there, credited to Tech_Alex. Select **CHL-0417**: both notes.
+4. Ask the E-412 question as Tech_Sarah. The pipeline shows "Site briefing: 2 field notes", and the answer opens with *Before you start*, crediting Tech_Alex.
+5. For contrast, select **INV-3112** at Mesa Ridge: Tech_Dave's heat hazard and Tech_Sarah's MC4-tool quirk, both from the seeded weeks.

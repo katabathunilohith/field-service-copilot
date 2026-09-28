@@ -28,6 +28,7 @@ from agent.tools import (
 from fleet.catalog import Catalog, ParsedQuery
 from fleet.tickets import TicketLedger
 from memory.bank_schemas import RepairRecord, now_iso, resolve_bank_id, unit_tag
+from memory.field_notes import FieldNotes, format_briefing
 from memory.hindsight_wrapper import HindsightMemory, RecallOutcome
 from memory.insights import MemoryHit, OutcomeSummary, memory_delta, summarize_outcomes
 
@@ -84,8 +85,8 @@ def select_prompt_hits(fleet: list[MemoryHit], unit: list[MemoryHit], *, observa
             if taken >= cap:
                 return
             doc, sig = hit.document_id or hit.id, signature(hit)
-            if doc in seen_docs or sig in seen_text:
-                continue
+            if doc in seen_docs or sig in seen_text or "record:note" in hit.tags:
+                continue  # field notes have their own briefing block in the prompt
             seen_docs.add(doc)
             seen_text.add(sig)
             chosen.append(hit)
@@ -119,11 +120,15 @@ async def _safe_emit(emit: Emit | None, event: str, data: dict[str, Any]) -> Non
 
 
 class DiagnosticOrchestrator:
-    def __init__(self, *, llm: GroqClient, memory: HindsightMemory, catalog: Catalog, tickets: TicketLedger) -> None:
+    def __init__(
+        self, *, llm: GroqClient, memory: HindsightMemory, catalog: Catalog, tickets: TicketLedger,
+        notes: FieldNotes | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
         self.catalog = catalog
         self.tickets = tickets
+        self.notes = notes or FieldNotes(memory, catalog)
 
     # ================================================================ public API
     async def diagnose(self, req: DiagnoseRequest, mode: str) -> dict[str, Any]:
@@ -178,6 +183,7 @@ class DiagnosticOrchestrator:
             technician=technician, parsed=parsed.to_dict(), manual=manual,
             telemetry=telemetry if telemetry and "error" not in telemetry else None,
             hits=hits, delta=delta, reflection=reflection_text, memory_source=(memory_view or {}).get("source"),
+            notes=format_briefing((memory_view or {}).get("briefing")),
         )
 
         llm_started = time.perf_counter()
@@ -289,6 +295,9 @@ class DiagnosticOrchestrator:
             query_text, tags, kwargs = self._unit_recall_args(parsed.unit_id)
             bodies.append(self.memory.recall_body(query_text, tags, **kwargs))
         started = self.memory.prefetch(resolve_bank_id(parsed.fleet), bodies)
+        if parsed.unit_id:
+            for bank, body in self.notes.recall_bodies(parsed.unit_id):
+                started += self.memory.prefetch(bank, [body])
         return {"started": started, "parsed": parsed.to_dict()}
 
     def reflection_candidates(self) -> list[dict[str, str]]:
@@ -332,7 +341,14 @@ class DiagnosticOrchestrator:
             query_text, tags, kwargs = self._unit_recall_args(parsed.unit_id)
             calls.append(self.memory.recall_context(bank_id, query_text, tags, run_id=run_id, limit=8,
                                                     label="unit history", **kwargs))
-        results = await asyncio.gather(*calls)
+        # The site briefing (field notes) is recalled alongside, so it adds no latency.
+        briefing_call = [self.notes.briefing(parsed.unit_id, run_id=run_id)] if parsed.unit_id else []
+        results = await asyncio.gather(*calls, *briefing_call)
+        briefing = results[-1] if briefing_call else None
+        if briefing_call:
+            results = results[:-1]
+            await _safe_emit(emit, "briefing", {"count": len(briefing["items"]), "source": briefing["source"],
+                                                "items": briefing["items"][:5], "site": briefing["site"]})
 
         if parsed.complete:
             stats_hits, fleet_recall, stats_source = results[0]
@@ -383,6 +399,7 @@ class DiagnosticOrchestrator:
             "hits": [h.to_dict() for h in hits],
             "delta": delta,
             "reflection": reflection_dict,
+            "briefing": briefing,
             "retain": None,
         }
         return view, hits, delta, reflection_text, timings

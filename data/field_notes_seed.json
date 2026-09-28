@@ -1,0 +1,65 @@
+[
+  {
+    "id": "note-seed-harbor-1",
+    "timestamp": "2026-09-04T16:40:00Z",
+    "technician": "Tech_Sarah",
+    "unit": "INV-2231",
+    "scope": "site",
+    "kind": "site_rule",
+    "text": "Coastal site: bring anti-oxidant compound and tinned-copper grounding straps, the site store does not stock them. The access gate closes at 17:30 sharp."
+  },
+  {
+    "id": "note-seed-lakeside-1",
+    "timestamp": "2026-09-06T14:10:00Z",
+    "technician": "Tech_Sarah",
+    "unit": "ELV-0108",
+    "scope": "site",
+    "kind": "site_rule",
+    "text": "Machine room is on level 33. Collect the machine-room key from the lobby security desk and sign the key log; after 20:00 security needs 15 minutes' notice."
+  },
+  {
+    "id": "note-seed-northgate-1",
+    "timestamp": "2026-09-10T15:25:00Z",
+    "technician": "Tech_Alex",
+    "unit": "CHL-0522",
+    "scope": "unit",
+    "kind": "machine_quirk",
+    "text": "The LWT thermowell sits behind the insulation jacket on the left-hand header. Unzip the jacket along the seam instead of cutting it; it re-seals."
+  },
+  {
+    "id": "note-seed-civic-1",
+    "timestamp": "2026-09-10T18:05:00Z",
+    "technician": "Tech_Sarah",
+    "unit": "ELV-0215",
+    "scope": "unit",
+    "kind": "machine_quirk",
+    "text": "The encoder cable shares trunking with the brake feed for the last metre before the KDL16 drive. There is room to re-route it along the left-hand cable tray."
+  },
+  {
+    "id": "note-seed-mesa-1",
+    "timestamp": "2026-09-12T19:30:00Z",
+    "technician": "Tech_Dave",
+    "unit": "INV-3112",
+    "scope": "site",
+    "kind": "hazard",
+    "text": "Array rows 6 to 9 exceed 70 °C by 13:00 in September. Schedule string testing before 11:00 and carry at least 3 litres of water per person."
+  },
+  {
+    "id": "note-seed-northgate-2",
+    "timestamp": "2026-09-14T13:50:00Z",
+    "technician": "Tech_Alex",
+    "unit": "CHL-1033",
+    "scope": "site",
+    "kind": "hazard",
+    "text": "The chiller pads border the forklift lane. Wear hi-vis and put out cones before opening any panel."
+  },
+  {
+    "id": "note-seed-mesa-2",
+    "timestamp": "2026-09-20T20:15:00Z",
+    "technician": "Tech_Sarah",
+    "unit": "INV-3112",
+    "scope": "unit",
+    "kind": "machine_quirk",
+    "text": "String 7 connectors sit under the rack rail. Bring the long 60 cm MC4 unlocking tool; the short one does not reach."
+  }
+]
