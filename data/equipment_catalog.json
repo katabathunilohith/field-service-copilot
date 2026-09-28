@@ -1,0 +1,292 @@
+{
+  "fleet": "North Region Commercial Service Fleet",
+  "note": "Synthetic reference data. Model names are used for realism; error codes, part numbers and manual sections are illustrative and not OEM documentation.",
+  "technicians": [
+    {"id": "Tech_Dave", "name": "Dave", "role": "Senior", "years_experience": 19, "specialties": ["chillers", "solar inverters"]},
+    {"id": "Tech_Sarah", "name": "Sarah", "role": "Specialist", "years_experience": 11, "specialties": ["power electronics", "vertical transport"]},
+    {"id": "Tech_Alex", "name": "Alex", "role": "Junior", "years_experience": 1, "specialties": ["general mechanical"]}
+  ],
+  "sites": {
+    "riverside-medical": {"name": "Riverside Medical Center", "environment": "urban; hospital critical cooling load"},
+    "northgate-logistics": {"name": "Northgate Logistics Hub", "environment": "industrial park; dusty loading apron"},
+    "civic-plaza": {"name": "Civic Plaza Offices", "environment": "urban office complex"},
+    "westfield-dc": {"name": "Westfield Data Center", "environment": "24/7 critical cooling"},
+    "harbor-point": {"name": "Harbor Point Solar Farm", "environment": "coastal; salt fog, high humidity"},
+    "mesa-ridge": {"name": "Mesa Ridge Solar", "environment": "high desert; extreme UV, 40 °C+ afternoons"},
+    "lakeside-tower": {"name": "Lakeside Tower", "environment": "32-storey mixed-use high-rise"}
+  },
+  "models": {
+    "carrier-30xa": {
+      "name": "Carrier AquaForce 30XA",
+      "fleet": "chillers",
+      "category": "Air-cooled screw chiller with VFD compressors",
+      "aliases": ["carrier aquaforce 30xa", "aquaforce 30xa", "aquaforce", "carrier 30xa", "30xa", "carrier chiller", "chiller model 30xa"],
+      "manual_doc": "30XA Service Manual SM-30XA-24 Rev C",
+      "error_codes": {
+        "E-412": {
+          "title": "Compressor A1 inverter overcurrent trip",
+          "severity": "critical",
+          "manual": {
+            "section": "§7.4 Inverter faults",
+            "probable_causes": [
+              "Failed inverter (VFD) power module or drive board",
+              "Compressor motor winding insulation breakdown",
+              "Supply voltage imbalance above 2%"
+            ],
+            "procedure": [
+              "Apply lockout/tagout on the main disconnect. Wait 5 minutes for DC bus discharge and verify < 50 V DC at the bus terminals.",
+              "Measure line-to-line supply voltage. Imbalance must be ≤ 2%.",
+              "Megger compressor A1 motor windings at 1000 V DC. Insulation must exceed 100 MΩ.",
+              "If supply and windings are within spec, replace inverter drive board P/N 30XA-VFD-412B.",
+              "Clear the alarm, restart, and run compressor A1 at 50% load for 30 minutes while logging current."
+            ],
+            "primary_action": "Replace inverter drive board 30XA-VFD-412B",
+            "parts": [{"part": "30XA-VFD-412B inverter drive board", "cost_usd": 4850}],
+            "est_labor_hours": 6.0
+          }
+        },
+        "E-221": {
+          "title": "Leaving chilled-water temperature sensor deviation",
+          "severity": "major",
+          "manual": {
+            "section": "§5.2 Temperature sensors",
+            "probable_causes": [
+              "Failed leaving-water thermistor",
+              "Open or shorted sensor wiring",
+              "Controller analog input fault"
+            ],
+            "procedure": [
+              "Compare the controller LWT reading against a calibrated reference probe. A deviation above 1.0 °C is out of tolerance.",
+              "Measure thermistor resistance and compare against the 10 kΩ NTC chart.",
+              "Replace leaving-water thermistor P/N 30XA-THM-10K.",
+              "Verify the reading is within ±0.5 °C of the reference probe."
+            ],
+            "primary_action": "Replace leaving-water thermistor 30XA-THM-10K",
+            "parts": [{"part": "30XA-THM-10K thermistor", "cost_usd": 85}],
+            "est_labor_hours": 1.5
+          }
+        },
+        "E-118": {
+          "title": "Condenser fan VFD fault",
+          "severity": "minor",
+          "manual": {
+            "section": "§6.1 Condenser fans",
+            "probable_causes": ["Pitted fan contactor K3", "Fan VFD fault latch", "Fan motor bearing failure"],
+            "procedure": [
+              "Isolate the fan circuit and inspect contactor K3 contacts.",
+              "Read the fan VFD fault log; clear latched faults.",
+              "Replace contactor K3 if contacts are pitted, then reset the fan VFD.",
+              "Run all condenser fans at 100% for 10 minutes."
+            ],
+            "primary_action": "Replace condenser fan contactor K3 and reset fan VFD",
+            "parts": [{"part": "K3 fan contactor", "cost_usd": 140}],
+            "est_labor_hours": 1.5
+          }
+        }
+      }
+    },
+    "apex-inv9000": {
+      "name": "Apex Solar Inverter INV-9000",
+      "fleet": "solar",
+      "category": "100 kW three-phase string inverter",
+      "aliases": ["apex solar inverter inv-9000", "apex inv-9000", "inv-9000", "inv9000", "apex inverter", "apex solar inverter"],
+      "manual_doc": "INV-9000 Installation & Service Guide v4.2",
+      "error_codes": {
+        "GF-17": {
+          "title": "Ground fault: DC insulation resistance (Riso) below 100 kΩ",
+          "severity": "critical",
+          "manual": {
+            "section": "§9.3 Ground-fault detection (GFDI)",
+            "probable_causes": [
+              "GFDI false trip (addressed in firmware v4.2.1)",
+              "DC input board isolation-monitor fault",
+              "Damaged PV string insulation"
+            ],
+            "procedure": [
+              "Isolate AC and DC sides and verify zero energy.",
+              "Perform a GFDI reset: Settings › Maintenance › Reset GFDI.",
+              "Update firmware to v4.2.1 or later.",
+              "Measure Riso per string at 1000 V; isolate strings below 1 MΩ.",
+              "If every string passes and the fault persists, replace DC input board P/N INV9-DCB-02."
+            ],
+            "primary_action": "GFDI reset and firmware update to v4.2.1",
+            "parts": [],
+            "est_labor_hours": 2.5
+          }
+        },
+        "OT-05": {
+          "title": "Heatsink over-temperature derate",
+          "severity": "major",
+          "manual": {
+            "section": "§8.2 Thermal management",
+            "probable_causes": ["Cooling fan failure", "Blocked air intake", "Outdated thermal derating curve (firmware < v4.2.1)"],
+            "procedure": [
+              "Run Diagnostics › Fan test and record fan RPM.",
+              "Inspect and clean the intake filter.",
+              "Update firmware to v4.2.1.",
+              "Replace cooling fan assembly INV9-FAN-120 if RPM is below 80% of rated."
+            ],
+            "primary_action": "Replace cooling fan assembly INV9-FAN-120 and update firmware",
+            "parts": [{"part": "INV9-FAN-120 fan assembly", "cost_usd": 620}],
+            "est_labor_hours": 2.5
+          }
+        },
+        "COM-31": {
+          "title": "Modbus RS-485 communication loss with SCADA",
+          "severity": "minor",
+          "manual": {
+            "section": "§10.1 Communications",
+            "probable_causes": ["Missing 120 Ω termination", "Loose comms card", "Address or baud mismatch"],
+            "procedure": [
+              "Verify the 120 Ω termination resistor at the end of the RS-485 chain.",
+              "Reseat the comms card.",
+              "Confirm Modbus address and baud rate against the SCADA register map."
+            ],
+            "primary_action": "Restore 120 Ω termination and reseat RS-485 comms card",
+            "parts": [],
+            "est_labor_hours": 1.0
+          }
+        }
+      }
+    },
+    "kone-mx20": {
+      "name": "KONE EcoDisc Hoist MX20",
+      "fleet": "elevators",
+      "category": "Gearless permanent-magnet hoisting machine",
+      "aliases": ["kone ecodisc hoist mx20", "ecodisc mx20", "kone mx20", "mx20", "ecodisc", "kone hoist", "kone elevator"],
+      "manual_doc": "MX20 Maintenance Manual AM-01.03.022",
+      "error_codes": {
+        "F-082": {
+          "title": "Encoder position deviation / relevelling fault",
+          "severity": "critical",
+          "manual": {
+            "section": "§4.6 Encoder and position feedback",
+            "probable_causes": ["Motor encoder failure", "Encoder coupling slip", "Drive parameter corruption"],
+            "procedure": [
+              "Take the car out of service and follow hoistway entry safety procedures.",
+              "Check encoder coupling and mounting screws.",
+              "Run the encoder self-test (KDL16 › Diagnostics › Encoder).",
+              "Replace motor encoder P/N KM-ENC-2048 and run a motor identification run.",
+              "Verify floor levelling accuracy of ±5 mm at every landing."
+            ],
+            "primary_action": "Replace motor encoder KM-ENC-2048 and run motor ID",
+            "parts": [{"part": "KM-ENC-2048 motor encoder", "cost_usd": 1900}],
+            "est_labor_hours": 6.0
+          }
+        },
+        "F-119": {
+          "title": "Brake release monitoring fault",
+          "severity": "major",
+          "manual": {
+            "section": "§3.2 Machinery brake",
+            "probable_causes": ["Brake air gap out of tolerance", "Worn release-monitoring microswitch"],
+            "procedure": [
+              "Measure the brake air gap; tolerance is 0.35–0.45 mm.",
+              "Adjust the air gap to 0.40 mm.",
+              "Test the release microswitch; replace it if contact bounce exceeds 5 ms.",
+              "Run 10 test cycles and confirm no fault."
+            ],
+            "primary_action": "Adjust brake air gap to 0.40 mm and test release microswitch",
+            "parts": [],
+            "est_labor_hours": 2.0
+          }
+        }
+      }
+    }
+  },
+  "telemetry_baselines": {
+    "carrier-30xa": {
+      "comp_a1_current_a": {"value": 205, "unit": "A", "normal": "150–290", "trip": 300},
+      "comp_a1_current_peak_24h_a": {"value": 262, "unit": "A", "normal": "< 290"},
+      "supply_voltage_imbalance_pct": {"value": 0.7, "unit": "%", "normal": "≤ 2.0"},
+      "vfd_dc_bus_ripple_vpp": {"value": 5, "unit": "V p-p", "normal": "< 8"},
+      "vfd_heatsink_temp_c": {"value": 44, "unit": "°C", "normal": "< 70"},
+      "compressor_vibration_mm_s": {"value": 3.1, "unit": "mm/s RMS", "normal": "< 4.5"},
+      "leaving_water_temp_c": {"value": 6.7, "unit": "°C", "normal": "setpoint ±0.5"},
+      "bms_reference_lwt_c": {"value": 6.7, "unit": "°C", "normal": "independent BMS probe"}
+    },
+    "apex-inv9000": {
+      "riso_kohm": {"value": 2400, "unit": "kΩ", "normal": "> 100 (trip)"},
+      "dc_input_v": {"value": 780, "unit": "V", "normal": "600–950"},
+      "ac_output_kw": {"value": 71, "unit": "kW", "normal": "≤ 100"},
+      "heatsink_temp_c": {"value": 58, "unit": "°C", "normal": "< 80 (derate)"},
+      "fan_rpm": {"value": 3400, "unit": "rpm", "normal": "≥ 2880 (80% of 3600 rated)"},
+      "chassis_ground_bond_ohm": {"value": 0.03, "unit": "Ω", "normal": "< 0.1"},
+      "leakage_current_ma": {"value": 6, "unit": "mA", "normal": "< 30"},
+      "firmware": {"value": "v4.2.1", "unit": "", "normal": "≥ v4.2.1"}
+    },
+    "kone-mx20": {
+      "encoder_deviation_events_24h": {"value": 0, "unit": "events", "normal": "0"},
+      "speed_ripple_pct": {"value": 0.8, "unit": "%", "normal": "< 1.5"},
+      "levelling_error_max_mm": {"value": 2, "unit": "mm", "normal": "±5"},
+      "brake_air_gap_mm": {"value": 0.40, "unit": "mm", "normal": "0.35–0.45"},
+      "brake_release_time_ms": {"value": 180, "unit": "ms", "normal": "< 250"},
+      "drive_temp_c": {"value": 41, "unit": "°C", "normal": "< 70"}
+    }
+  },
+  "units": {
+    "CHL-0417": {"model": "carrier-30xa", "site": "riverside-medical", "location": "Roof plant, Tower B", "installed": 2019,
+      "telemetry": {
+        "comp_a1_current_peak_24h_a": {"value": 318, "unit": "A", "normal": "< 290", "flag": "3 trips above the 300 A limit"},
+        "vfd_dc_bus_ripple_vpp": {"value": 14, "unit": "V p-p", "normal": "< 8", "flag": "intermittent, during start-up only"},
+        "compressor_vibration_mm_s": {"value": 7.8, "unit": "mm/s RMS", "normal": "< 4.5", "flag": "peak during compressor start; 3.0 at steady state"},
+        "motor_insulation_mohm": {"value": 810, "unit": "MΩ", "normal": "> 100", "flag": "last megger 2026-09-17"}
+      },
+      "events": [
+        "3 × E-412 in the last 24 h; all 3 trips occurred within 90 s of compressor A1 start, coinciding with vibration peaks",
+        "Inverter drive board 30XA-VFD-412B replaced on 2026-09-17 (board installed 11 days ago)"
+      ]
+    },
+    "CHL-0522": {"model": "carrier-30xa", "site": "northgate-logistics", "location": "Ground pad, north yard", "installed": 2020,
+      "telemetry": {
+        "leaving_water_temp_c": {"value": 7.9, "unit": "°C", "normal": "setpoint 6.0 ±0.5", "flag": "controller reading"},
+        "bms_reference_lwt_c": {"value": 6.0, "unit": "°C", "normal": "independent BMS probe", "flag": "Δ +1.9 °C vs controller"},
+        "lwt_thermistor_resistance_kohm": {"value": 22.4, "unit": "kΩ", "normal": "10 kΩ NTC curve", "flag": "consistent with 7.9 °C on the NTC chart"}
+      },
+      "events": ["E-221 active for 6 h", "Unit is over-cooling the plant loop by ~1.9 °C, raising compressor energy use"]
+    },
+    "CHL-0631": {"model": "carrier-30xa", "site": "civic-plaza", "location": "Roof, east bay", "installed": 2018},
+    "CHL-0708": {"model": "carrier-30xa", "site": "westfield-dc", "location": "Chiller yard, position 2", "installed": 2021},
+    "CHL-0815": {"model": "carrier-30xa", "site": "westfield-dc", "location": "Chiller yard, position 4", "installed": 2021},
+    "CHL-0924": {"model": "carrier-30xa", "site": "riverside-medical", "location": "Roof plant, Tower A", "installed": 2017},
+    "CHL-1033": {"model": "carrier-30xa", "site": "northgate-logistics", "location": "Ground pad, south yard", "installed": 2022},
+    "INV-2231": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block A1", "installed": 2021},
+    "INV-2240": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block A2", "installed": 2021},
+    "INV-2252": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block B1", "installed": 2021},
+    "INV-2267": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block B2", "installed": 2022},
+    "INV-2275": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block C1", "installed": 2022},
+    "INV-2288": {"model": "apex-inv9000", "site": "harbor-point", "location": "Array block C2", "installed": 2022},
+    "INV-3107": {"model": "apex-inv9000", "site": "mesa-ridge", "location": "Row 3 skid", "installed": 2020},
+    "INV-3112": {"model": "apex-inv9000", "site": "mesa-ridge", "location": "Row 4 skid", "installed": 2020},
+    "INV-3125": {"model": "apex-inv9000", "site": "mesa-ridge", "location": "Row 6 skid", "installed": 2021},
+    "INV-3133": {"model": "apex-inv9000", "site": "mesa-ridge", "location": "Row 7 skid", "installed": 2021},
+    "INV-3140": {"model": "apex-inv9000", "site": "mesa-ridge", "location": "Row 9 skid", "installed": 2023,
+      "telemetry": {
+        "riso_kohm": {"value": 62, "unit": "kΩ", "normal": "> 100 (trip)", "flag": "drops to 55–70 kΩ between 11:00 and 15:00, recovers to 1.8 MΩ overnight"},
+        "chassis_ground_bond_ohm": {"value": 0.04, "unit": "Ω", "normal": "< 0.1", "flag": "within spec"},
+        "leakage_current_ma": {"value": 38, "unit": "mA", "normal": "< 30", "flag": "string 7 contributes 31 mA"},
+        "ambient_temp_c": {"value": 41, "unit": "°C", "normal": "site design 45"}
+      },
+      "events": ["4 × GF-17 in the last 24 h, all during peak irradiance", "GFDI reset performed remotely at 07:10; fault returned at 11:42"]
+    },
+    "ELV-0108": {"model": "kone-mx20", "site": "lakeside-tower", "location": "Car 1 (high-rise bank)", "installed": 2016},
+    "ELV-0109": {"model": "kone-mx20", "site": "lakeside-tower", "location": "Car 2 (high-rise bank)", "installed": 2016},
+    "ELV-0215": {"model": "kone-mx20", "site": "civic-plaza", "location": "Car A", "installed": 2018,
+      "telemetry": {
+        "encoder_deviation_events_24h": {"value": 14, "unit": "events", "normal": "0", "flag": "11 of 14 within 250 ms of brake coil release/engage"},
+        "speed_ripple_pct": {"value": 3.2, "unit": "%", "normal": "< 1.5"},
+        "levelling_error_max_mm": {"value": 11, "unit": "mm", "normal": "±5", "flag": "passengers report a step at landings 4 and 9"}
+      },
+      "events": ["Encoder coupling replaced 2026-09-02 after F-082; fault cleared without a confirmed root cause"]
+    },
+    "ELV-0216": {"model": "kone-mx20", "site": "civic-plaza", "location": "Car B", "installed": 2018},
+    "ELV-0302": {"model": "kone-mx20", "site": "riverside-medical", "location": "Bed lift 1", "installed": 2019},
+    "ELV-0411": {"model": "kone-mx20", "site": "northgate-logistics", "location": "Goods lift", "installed": 2020}
+  },
+  "sample_prompts": [
+    {"technician": "Tech_Alex", "unit": "CHL-0417", "text": "Carrier AquaForce 30XA unit CHL-0417 at Riverside Medical is tripping E-412 again. The manual says replace the inverter board. Should I?"},
+    {"technician": "Tech_Alex", "unit": "INV-3140", "text": "Apex INV-9000 at Mesa Ridge (INV-3140) keeps throwing GF-17 around midday. GFDI reset didn't stick. What next?"},
+    {"technician": "Tech_Dave", "unit": "ELV-0215", "text": "KONE MX20 car ELV-0215 is jerking on relevel, F-082 logged 14 times today. Do I swap the encoder?"},
+    {"technician": "Tech_Sarah", "unit": "CHL-0522", "text": "30XA CHL-0522 showing E-221, controller LWT is 1.9 °C above the BMS probe. Replace the thermistor?"}
+  ]
+}

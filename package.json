@@ -1,0 +1,10 @@
+{
+  "name": "field-service-copilot",
+  "private": true,
+  "description": "Convenience scripts; the UI lives in ui/ and the API in main.py",
+  "scripts": {
+    "postinstall": "npm --prefix ui install",
+    "dev": "npm --prefix ui run dev",
+    "build": "npm --prefix ui run build"
+  }
+}

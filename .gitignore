@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime state written by the app (tickets, retain journal)
+data/runtime/
+
+# Node / UI
+node_modules/
+ui/dist/
+*.log
+.DS_Store
+
+# Local tool config
+.claude/
