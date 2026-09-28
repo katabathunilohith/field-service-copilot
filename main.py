@@ -234,7 +234,8 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
         now = time.time()
         if s.health_cache is None or s.health_cache[0] < now:
             probe = await s.memory.health(all_bank_ids()[0])
-            s.health_cache = (now + 60, probe)
+            # Cache a healthy result for a minute, a failure only briefly so recovery shows quickly.
+            s.health_cache = (now + (60 if probe.get("reachable") else 10), probe)
         return {
             "status": "ok",
             "config": s.cfg.public_summary(),
