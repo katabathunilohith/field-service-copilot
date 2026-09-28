@@ -135,7 +135,7 @@ The bank profile (`PUT /v1/default/banks/{id}`) sets a mission, background, reta
 | Hindsight reflect > 12 s or error | Deterministic synthesis from the same outcome statistics |
 | Hindsight facts come back without structured metadata | Hold-rate stats use the write-through ledger, labelled `stats: local ledger` |
 | Groq unavailable or no key | A deterministic brief from the manual and memory statistics, clearly labelled |
-| No keys at all | The whole app still works on local data; `test_workflow.py` check 5 proves it |
+| No keys at all | The whole app still works on local data; the no-keys check in `test_workflow.py` proves it |
 
 ## Data (`data/`)
 
