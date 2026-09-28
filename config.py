@@ -105,6 +105,10 @@ class Settings:
     app_access_token: str | None = field(default_factory=lambda: _secret("APP_ACCESS_TOKEN"))
     # Per-client limit for the expensive endpoints (diagnose, transcribe, bulletins), per minute.
     rate_limit_per_min: int = field(default_factory=lambda: _int("RATE_LIMIT_PER_MIN", 20))
+    # Demo checkpoint/reset deletes memory, so it is on for development and off elsewhere unless enabled.
+    demo_tools: bool = field(
+        default_factory=lambda: _bool("DEMO_TOOLS", (os.getenv("ENVIRONMENT") or "development") == "development")
+    )
 
     @property
     def hindsight_enabled(self) -> bool:
@@ -142,6 +146,7 @@ class Settings:
             "groq_baseline_model": self.groq_baseline_model or self.groq_model,
             "voice_enabled": self.groq_enabled,
             "access_token_required": self.app_access_token is not None,
+            "demo_tools": self.demo_tools,
             "environment": self.environment,
             "setup_hints": self.setup_hints(),
         }

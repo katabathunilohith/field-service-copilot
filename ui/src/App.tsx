@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, setAccessToken } from "./api";
 import BulletinsPanel from "./components/BulletinsPanel";
 import ChatWindow from "./components/ChatWindow";
+import DemoMenu from "./components/DemoMenu";
 import LearningMetrics from "./components/LearningMetrics";
 import MemoryInspector from "./components/MemoryInspector";
 import { Badge, Icon } from "./components/ui";
@@ -135,6 +136,7 @@ export default function App() {
               <Icon name="memory" className="size-3.5" />
               Memory inspector
             </button>
+            {health?.config.demo_tools && <DemoMenu />}
             <button
               onClick={() => setTheme((t) => (t === "system" ? "light" : t === "light" ? "dark" : "system"))}
               className="flex h-8 items-center gap-1 rounded-md border border-line px-2 text-xs text-ink-2 hover:bg-surface-2"

@@ -838,6 +838,38 @@ class HindsightMemory:
                               f"{API_PREFIX}/{bank_id}/directives", payload, timeout_s)
         return "created"
 
+    async def delete_document(self, bank_id: str, document_id: str, *, timeout_s: float = 20.0) -> dict[str, Any]:
+        """Delete a document and every fact Hindsight extracted from it. Already gone counts as done."""
+        start = time.perf_counter()
+        path = f"{API_PREFIX}/{bank_id}/documents/{document_id}"
+        try:
+            raw = await self._request("DELETE", path, None, timeout_s)
+        except HindsightError as exc:
+            if exc.status != 404:
+                raise
+            raw = {"success": True, "document_id": document_id, "memory_units_deleted": 0, "message": "already deleted"}
+        self._recall_cache.clear()
+        self.events.add(MemoryEvent(op="bank", bank_id=bank_id, status="ok", source="hindsight",
+                                    latency_ms=_elapsed_ms(start), request={"delete": document_id}, response=raw,
+                                    summary=f"document {document_id} deleted ({raw.get('memory_units_deleted', 0)} facts)"))
+        return raw
+
+    async def delete_directive(self, bank_id: str, name: str, *, timeout_s: float = 20.0) -> bool:
+        """Delete the directive with this name, if it exists. Returns whether one was deleted."""
+        match = next((d for d in await self.list_directives(bank_id, timeout_s=timeout_s) if d.get("name") == name), None)
+        if match is None:
+            return False
+        await self._bank_step(bank_id, f"directive '{name}' deleted", "DELETE",
+                              f"{API_PREFIX}/{bank_id}/directives/{match['id']}", None, timeout_s)
+        return True
+
+    async def wait_for_deliveries(self, timeout_s: float = 30.0) -> bool:
+        """Wait until no retain is in flight (so a reset cannot race a delivery). True if idle."""
+        deadline = time.monotonic() + timeout_s
+        while self._inflight_docs and time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+        return not self._inflight_docs
+
     async def list_directives(self, bank_id: str, *, timeout_s: float = 10.0) -> list[dict[str, Any]]:
         listing = await self._request("GET", f"{API_PREFIX}/{bank_id}/directives", None, timeout_s)
         return listing.get("items") or []
