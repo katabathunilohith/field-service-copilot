@@ -11,8 +11,11 @@ Latency and degradation design (measured against Hindsight Cloud: recall
             store. A timed-out call is *shielded*, not cancelled: it finishes in the
             background and warms a short-lived cache, and the UI can prefetch the same
             recall while the technician is still typing.
-* retain  - journaled locally first (the outbox), then sent async. Anything Hindsight
-            has not acknowledged is re-sent by the outbox sync loop.
+* retain  - journaled locally first (the outbox), then delivered by a background task under
+            its own budget (HINDSIGHT_RETAIN_TIMEOUT_S per attempt, retried with backoff). A
+            retain happens after the answer is shown, so it never holds up a technician and
+            is never cut off by the 1.5 s recall budget. Anything Hindsight has not
+            acknowledged is re-sent by the outbox sync loop.
 * reflect - never blocks a diagnosis: served from cache, prewarmed at startup and
             refreshed when new outcomes arrive, with a deterministic local synthesis
             in the meantime.
@@ -47,6 +50,9 @@ REFLECT_CACHE_TTL_S = 1800
 LATE_RESULT_GRACE_S = 15.0  # how long a timed-out recall may keep running to warm the cache
 KEEP_WARM_INTERVAL_S = 45
 OUTBOX_SYNC_INTERVAL_S = 60
+RETAIN_RETRIES = 2  # three attempts in total, each under HINDSIGHT_RETAIN_TIMEOUT_S
+RETAIN_BACKOFF_S = 1.5
+RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 class HindsightError(Exception):
@@ -163,6 +169,7 @@ class HindsightMemory:
         self._reflect_inflight: dict[tuple[str, str, str], asyncio.Task] = {}
         self._background: set[asyncio.Task] = set()
         self._sync_lock = asyncio.Lock()
+        self._inflight_docs: set[str] = set()  # retains being delivered right now (not outbox work)
 
     @property
     def enabled(self) -> bool:
@@ -218,7 +225,12 @@ class HindsightMemory:
             except ValueError:
                 retry_after_s = None
             raise HindsightError(f"HTTP {resp.status_code}: {resp.text[:300]}", resp.status_code, retry_after_s)
-        return resp.json() if resp.content else {}
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError as exc:  # a proxy error page must degrade like any other failure
+            raise HindsightError(f"invalid JSON from Hindsight: {exc}", resp.status_code) from exc
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None, budget_s: float) -> Any:
         """_send under a hard wall-clock budget (connect + TLS + server time)."""
@@ -406,14 +418,16 @@ class HindsightMemory:
         *,
         record: RepairRecord,
         run_id: str | None = None,
+        wait_s: float | None = None,
     ) -> RetainOutcome:
         """Retain one structured interaction. `record` carries the full context; the
-        positional arguments are asserted against it so call sites stay honest."""
+        positional arguments are asserted against it so call sites stay honest.
+        `wait_s` bounds how long to wait for Hindsight's acknowledgement (see retain_records)."""
         if (record.technician_id, record.unit_id, record.error_code, record.action_taken, record.outcome_held) != (
             technician_id, unit_id, error_code, action_taken, outcome_held,
         ):
             raise ValueError("retain_interaction arguments do not match the record")
-        result = await self.retain_records(bank_id, [record], run_id=run_id)
+        result = await self.retain_records(bank_id, [record], run_id=run_id, wait_s=wait_s)
         if outcome_held is not None:
             # A confirmed outcome changes the pattern: refresh the reflection once Hindsight has it.
             self.invalidate_reflection(bank_id, record.model_key, record.error_code)
@@ -429,22 +443,26 @@ class HindsightMemory:
         run_id: str | None = None,
         journal: bool = True,
         timeout_s: float | None = None,
-        retries: int = 0,
+        retries: int | None = None,
         async_: bool = True,
+        wait_s: float | None = None,
     ) -> RetainOutcome:
-        """Retain a batch. Journals locally first (the outbox), so nothing is lost if Hindsight is down.
+        """Retain a batch: journal locally first (the outbox), then deliver to Hindsight.
 
-        `async_=True` (default) lets Hindsight extract facts in the background and return an
-        operation id immediately, which is what keeps interactive retains inside the time budget."""
+        Delivery runs as its own task under the retain budget (HINDSIGHT_RETAIN_TIMEOUT_S per
+        attempt, retried with backoff), never the 1.5 s interactive recall budget: a retain happens
+        after the answer is on screen, so a slow write must neither block nor "fail" a diagnosis.
+
+        `wait_s` bounds how long the caller waits for Hindsight's acknowledgement (None: until
+        delivery finishes). If it is not back in time the outcome is 'sending' and delivery completes
+        in the background; the outbox guarantees the record lands even across restarts.
+        `async_=True` lets Hindsight extract facts after acknowledging, which keeps the write fast."""
         if journal:
             for record in records:
                 self.fallback.add(record)
         self._recall_cache.clear()  # new knowledge: cached recalls may be stale
         body = {"items": [r.to_retain_item() for r in records], "async": async_}
         doc_ids = [r.document_id for r in records]
-        path = f"{API_PREFIX}/{bank_id}/memories"
-        budget_s = timeout_s or self.cfg.hindsight_timeout_s
-        start = time.perf_counter()
 
         if not self.enabled:
             event = self.events.add(
@@ -457,48 +475,85 @@ class HindsightMemory:
             return RetainOutcome("skipped", "local_fallback", event.id, len(records), document_ids=doc_ids,
                                  error="Hindsight not configured")
 
+        event = self.events.add(
+            MemoryEvent(
+                op="retain", bank_id=bank_id, status="sending", source="hindsight", latency_ms=0,
+                request=body, run_id=run_id, summary=f"{len(records)} record(s) sending to Hindsight",
+            )
+        )
+        self._inflight_docs.update(doc_ids)
+        task = self._spawn(self._deliver(
+            event.id, bank_id, body, doc_ids, journal=journal,
+            timeout_s=timeout_s or self.cfg.hindsight_retain_timeout_s,
+            retries=RETAIN_RETRIES if retries is None else retries,
+        ))
+        if task is None:  # no running event loop: leave it to the outbox
+            self._inflight_docs.difference_update(doc_ids)
+            return RetainOutcome("deferred", "local_fallback", event.id, len(records), document_ids=doc_ids,
+                                 error="no event loop for delivery")
+        try:
+            if wait_s is None:
+                return await asyncio.shield(task)
+            return await asyncio.wait_for(asyncio.shield(task), timeout=wait_s)
+        except TimeoutError:
+            # Still in flight: the answer is not held up; delivery finishes in the background.
+            return RetainOutcome("sending", "hindsight", event.id, len(records), document_ids=doc_ids)
+
+    async def _deliver(
+        self, event_id: int, bank_id: str, body: dict[str, Any], doc_ids: list[str], *,
+        journal: bool, timeout_s: float, retries: int,
+    ) -> RetainOutcome:
+        """POST a retain with retries and jittered backoff. Never raises; updates its event in place."""
+        path = f"{API_PREFIX}/{bank_id}/memories"
+        n = len(body["items"])
+        start = time.perf_counter()
         attempt = 0
-        while True:
-            try:
-                raw = await self._request("POST", path, body, budget_s)
-                break
-            except (TimeoutError, HindsightError) as exc:
-                status = getattr(exc, "status", None)
-                retryable = isinstance(exc, TimeoutError) or status in (429, 500, 502, 503, 504)
-                if retryable and attempt < retries:
-                    wait = getattr(exc, "retry_after", None) or 1.5 * (2 ** attempt)
-                    await asyncio.sleep(random.uniform(0.5, 1.0) * wait)
-                    attempt += 1
-                    continue
-                reason = f"retain exceeded {budget_s:.1f}s budget" if isinstance(exc, TimeoutError) else str(exc)
-                event = self.events.add(
-                    MemoryEvent(
-                        op="retain", bank_id=bank_id, status="deferred", source="local_fallback",
-                        latency_ms=_elapsed_ms(start), request=body, error=reason, run_id=run_id,
-                        summary=f"{len(records)} record(s) kept in the outbox; sync will retry",
+        try:
+            while True:
+                try:
+                    raw = await self._request("POST", path, body, timeout_s)
+                    break
+                except (TimeoutError, HindsightError) as exc:
+                    status = getattr(exc, "status", None)
+                    retryable = isinstance(exc, TimeoutError) or status in RETRYABLE_STATUS
+                    reason = f"retain attempt exceeded {timeout_s:.0f}s" if isinstance(exc, TimeoutError) else str(exc)[:300]
+                    if retryable and attempt < retries:
+                        wait = getattr(exc, "retry_after", None) or RETAIN_BACKOFF_S * (2 ** attempt)
+                        self.events.update(event_id, error=f"attempt {attempt + 1} failed ({reason}); retrying")
+                        await asyncio.sleep(random.uniform(0.5, 1.0) * wait)
+                        attempt += 1
+                        continue
+                    self.events.update(
+                        event_id, status="deferred", source="local_fallback", latency_ms=_elapsed_ms(start),
+                        error=reason, summary=f"{n} record(s) kept in the outbox; sync will retry",
                     )
-                )
-                if journal and retryable:
-                    self._spawn(self._sync_soon([bank_id]))
-                return RetainOutcome("deferred", "local_fallback", event.id, len(records), error=reason, document_ids=doc_ids)
+                    if journal and retryable:
+                        self._spawn(self._sync_soon([bank_id], delay_s=30.0))
+                    return RetainOutcome("deferred", "local_fallback", event_id, n, error=reason, document_ids=doc_ids)
+        finally:
+            self._inflight_docs.difference_update(doc_ids)
 
         op_id = raw.get("operation_id") or next(iter(raw.get("operation_ids") or []), None)
         if journal and self._acks is not None:
             self._acks.add(doc_ids, bank_id=bank_id, operation_id=op_id)
-        event = self.events.add(
-            MemoryEvent(
-                op="retain", bank_id=bank_id, status="queued" if raw.get("async") else "ok", source="hindsight",
-                latency_ms=_elapsed_ms(start), request=body, response=raw, run_id=run_id,
-                summary=f"{len(records)} record(s) accepted by Hindsight" + (f" (op {op_id})" if op_id else ""),
-            )
+        status = "queued" if raw.get("async") else "ok"
+        latency = _elapsed_ms(start)
+        retried = f" after {attempt} retr{'y' if attempt == 1 else 'ies'}" if attempt else ""
+        self.events.update(
+            event_id, status=status, source="hindsight", latency_ms=latency, response=raw, error=None,
+            summary=f"{n} record(s) accepted by Hindsight in {latency} ms{retried}" + (f" (op {op_id})" if op_id else ""),
         )
-        return RetainOutcome(event.status, "hindsight", event.id, len(records), operation_id=op_id, document_ids=doc_ids)
+        return RetainOutcome(status, "hindsight", event_id, n, operation_id=op_id, document_ids=doc_ids)
 
     # ----------------------------------------------------------------- outbox
     def pending_records(self) -> list[RepairRecord]:
+        """Journaled records Hindsight has not acknowledged, excluding ones being delivered right now."""
         if self._acks is None:
             return []
-        return [r for r in self.fallback.runtime_records() if r.document_id not in self._acks]
+        return [
+            r for r in self.fallback.runtime_records()
+            if r.document_id not in self._acks and r.document_id not in self._inflight_docs
+        ]
 
     def outbox_status(self) -> dict[str, Any]:
         pending = self.pending_records()

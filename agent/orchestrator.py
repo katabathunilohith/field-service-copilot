@@ -38,6 +38,9 @@ Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 MAX_TOOL_ROUNDS = 4
 MAX_HISTORY_TURNS = 6
 REFLECT_WAIT_S = 0.3  # a diagnosis never waits on a cold reflect; it runs in the background instead
+# How long a run waits for Hindsight to acknowledge the retain. The answer is already on screen
+# by then; past this the write finishes in the background and the outbox guarantees delivery.
+RETAIN_WAIT_S = 20.0
 
 
 @dataclass
@@ -196,6 +199,8 @@ class DiagnosticOrchestrator:
             tool_ctx.ticket = ticket
             if ticket:
                 await _safe_emit(emit, "ticket", {"ticket": ticket})
+            if parsed.complete and parsed.unit_id and ticket:
+                await _safe_emit(emit, "retain", {"status": "sending", "source": "hindsight", "operation_id": None, "error": None})
             retain_view = await self._retain_session(parsed, technician, ticket, delta, run_id, warnings)
             if memory_view is not None:
                 memory_view["retain"] = retain_view
@@ -258,7 +263,7 @@ class DiagnosticOrchestrator:
         )
         retain = await self.memory.retain_interaction(
             resolve_bank_id(model["fleet"]), record.technician_id, record.unit_id, record.error_code,
-            record.action_taken, record.outcome_held, record=record, run_id=ticket.get("run_id"),
+            record.action_taken, record.outcome_held, record=record, run_id=ticket.get("run_id"), wait_s=RETAIN_WAIT_S,
         )
         return {"ticket": ticket, "retain": retain.to_dict(), "record": record.to_retain_item()}
 
@@ -535,6 +540,6 @@ class DiagnosticOrchestrator:
         )
         retain = await self.memory.retain_interaction(
             resolve_bank_id(parsed.fleet), record.technician_id, record.unit_id, record.error_code,
-            record.action_taken, record.outcome_held, record=record, run_id=run_id,
+            record.action_taken, record.outcome_held, record=record, run_id=run_id, wait_s=RETAIN_WAIT_S,
         )
         return {**retain.to_dict(), "record": record.to_retain_item()}

@@ -102,7 +102,12 @@ def fmt_stats(delta: dict[str, Any] | None) -> str:
             + (f"; held at: {sites}" if sites else "") + "."
         )
     for c in delta.get("no_defect_checks") or []:
-        lines.append(f"- Ruled out: known field pattern checked on {c['unit_id']} {c['date']} by {c['technician']} and was NOT the cause.")
+        fixed = (f" The fault was then fixed by '{c['resolved_by']}'" + (f" ({c['resolution']})" if c.get("resolution") else "") + "."
+                 if c.get("resolved_by") else "")
+        lines.append(
+            f"- Exception on {c['unit_id']} {c['date']}: {c['technician']} checked the known field pattern, found NO defect, "
+            f"correctly ruled it out.{fixed}"
+        )
     history = delta.get("unit_history") or []
     if history:
         lines.append("- This unit's history: " + "; ".join(

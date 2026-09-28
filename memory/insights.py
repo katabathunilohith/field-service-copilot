@@ -171,7 +171,8 @@ def summarize_outcomes(hits: list[MemoryHit], unit_id: str | None = None) -> Out
     for hit in usable:
         action = hit.action_taken or ""
         category = hit.action_category or "unknown"
-        entry = {"date": hit.when, "technician": hit.technician, "unit_id": hit.unit_id, "action": action, "held": hit.outcome_held}
+        entry = {"date": hit.when, "technician": hit.technician, "unit_id": hit.unit_id, "action": action,
+                 "held": hit.outcome_held, "work_order": hit.metadata.get("work_order")}
         if unit_id and hit.unit_id == unit_id:
             unit_history.append(entry)
         if action.lower().startswith(NO_DEFECT_PREFIX):
@@ -191,6 +192,21 @@ def summarize_outcomes(hits: list[MemoryHit], unit_id: str | None = None) -> Out
                 stats.sites[site] = stats.sites.get(site, 0) + 1
         if hit.technician and hit.technician not in stats.technicians:
             stats.technicians.append(hit.technician)
+
+    # For each "pattern checked, no defect" case, record what actually fixed that work order, so
+    # neither a reader nor the LLM mistakes a correctly ruled-out check for a missed diagnosis.
+    by_work_order: dict[str, list[MemoryHit]] = {}
+    for hit in usable:
+        if hit.metadata.get("work_order"):
+            by_work_order.setdefault(hit.metadata["work_order"], []).append(hit)
+    for entry in no_defect:
+        later = [
+            h for h in by_work_order.get(entry.get("work_order") or "", [])
+            if h.outcome_held and h.when >= entry["date"] and not (h.action_taken or "").lower().startswith(NO_DEFECT_PREFIX)
+        ]
+        if later:
+            entry["resolved_by"] = later[0].action_taken
+            entry["resolution"] = later[0].metadata.get("root_cause", "")
 
     ordered = sorted(groups.values(), key=lambda s: (-s.held, -s.attempts))
     return OutcomeSummary(

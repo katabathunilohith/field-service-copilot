@@ -42,6 +42,15 @@ function upsert(steps: Step[], step: Step): Step[] {
   return next;
 }
 
+/** Retain runs after the answer: in flight, acknowledged, still sending, or parked in the outbox. */
+function retainStep(status: string, source: string): Step {
+  if (source === "hindsight" && (status === "queued" || status === "ok"))
+    return { key: "retain", label: "Session retained to Hindsight", detail: status, state: "done" };
+  if (source === "hindsight" && status === "sending")
+    return { key: "retain", label: "Retaining session to Hindsight", detail: "answer is ready; this runs in the background", state: "running" };
+  return { key: "retain", label: "Session saved to the outbox", detail: "syncs to Hindsight automatically", state: "info" };
+}
+
 /** Fold one server-sent event into the live pipeline view of a pane. */
 function applyEvent(live: Live, e: StreamEvent): Live {
   const steps = live.steps;
@@ -98,15 +107,7 @@ function applyEvent(live: Live, e: StreamEvent): Live {
     case "ticket":
       return { ...live, steps: upsert(steps, { key: "ticket", label: `Filed work order ${e.data.ticket.id}`, detail: e.data.ticket.created_via === "agent_tool" ? "via log_repair_ticket" : "auto", state: "done" }) };
     case "retain":
-      return {
-        ...live,
-        steps: upsert(steps, {
-          key: "retain",
-          label: e.data.source === "hindsight" ? "Session retained to Hindsight" : "Session saved to the outbox",
-          detail: e.data.source === "hindsight" ? e.data.status : "syncs to Hindsight automatically",
-          state: e.data.source === "hindsight" ? "done" : "info",
-        }),
-      };
+      return { ...live, steps: upsert(steps, retainStep(e.data.status, e.data.source)) };
     default:
       return live;
   }
@@ -578,8 +579,15 @@ function RecallStrip({ run, onInspect }: { run: AgentRun; onInspect: () => void 
         </Badge>
       )}
       {mem.retain && (
-        <Badge tone={mem.retain.source === "hindsight" ? "good" : "neutral"} title={mem.retain.error ?? undefined}>
-          {mem.retain.source === "hindsight" ? `retained · ${mem.retain.status}` : "saved to outbox"}
+        <Badge
+          tone={mem.retain.source === "hindsight" && mem.retain.status !== "sending" ? "good" : "neutral"}
+          title={mem.retain.error ?? undefined}
+        >
+          {mem.retain.source !== "hindsight"
+            ? "saved to outbox"
+            : mem.retain.status === "sending"
+              ? "retaining in background"
+              : `retained · ${mem.retain.status}`}
         </Badge>
       )}
       <button onClick={onInspect} className="ml-auto text-xs font-medium text-accent-ink hover:underline">
@@ -651,7 +659,10 @@ function DeltaCard({ delta }: { delta: MemoryDelta }) {
         <p className="mt-2 flex gap-1.5 text-xs text-ink-2">
           <Icon name="alert" className="mt-0.5 size-3.5 shrink-0 text-warn-ink" />
           Not always the cause: checked and ruled out on{" "}
-          {delta.no_defect_checks.map((c) => `${c.unit_id} (${formatDate(c.date)})`).join(", ")}.
+          {delta.no_defect_checks
+            .map((c) => `${c.unit_id} (${formatDate(c.date)})${c.resolution ? `, where it was ${c.resolution.charAt(0).toLowerCase()}${c.resolution.slice(1)}` : ""}`)
+            .join("; ")}
+          .
         </p>
       )}
     </section>
@@ -730,9 +741,11 @@ function TicketCard({ run, outcome, onConfirm }: { run: AgentRun; outcome?: Outc
         </div>
       ) : (
         <p className="mt-2 text-xs text-ink-2">
-          Outcome {outcome.retain?.source === "hindsight"
-            ? `retained to Hindsight (${outcome.retain.status}${outcome.retain.operation_id ? ` · ${outcome.retain.operation_id.slice(0, 8)}` : ""})`
-            : "saved to the outbox; it syncs to Hindsight automatically"}
+          Outcome {outcome.retain?.source !== "hindsight"
+            ? "saved to the outbox; it syncs to Hindsight automatically"
+            : outcome.retain.status === "sending"
+              ? "is being sent to Hindsight in the background"
+              : `retained to Hindsight (${outcome.retain.status}${outcome.retain.operation_id ? ` · ${outcome.retain.operation_id.slice(0, 8)}` : ""})`}
           . The next technician who hits {t.error_code} will see it.
         </p>
       )}

@@ -126,6 +126,9 @@ export interface OutcomeEntry {
   unit_id: string | null;
   action: string;
   held: boolean | null;
+  work_order?: string | null;
+  resolved_by?: string;
+  resolution?: string;
 }
 
 export interface MemoryDelta {

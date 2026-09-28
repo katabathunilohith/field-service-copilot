@@ -70,9 +70,12 @@ class Settings:
     )
     hindsight_bank_id: str = field(default_factory=lambda: os.getenv("HINDSIGHT_BANK_ID") or "field-service-copilot")
     hindsight_per_fleet_banks: bool = field(default_factory=lambda: _bool("HINDSIGHT_PER_FLEET_BANKS"))
-    # Interactive budget for recall/retain. Past it the agent answers from local memory while the
+    # Interactive budget for recall. Past it the agent answers from local memory while the
     # Hindsight call finishes in the background and warms the cache.
     hindsight_timeout_s: float = field(default_factory=lambda: _float("HINDSIGHT_TIMEOUT_S", 1.5))
+    # Retain is a write that happens after the answer is on screen, so it gets its own, longer
+    # budget (per attempt, with retries) instead of the interactive recall budget.
+    hindsight_retain_timeout_s: float = field(default_factory=lambda: _float("HINDSIGHT_RETAIN_TIMEOUT_S", 15.0))
     # Reflect is an LLM synthesis on the Hindsight side (~15 s); it runs in the background and is cached.
     hindsight_reflect_timeout_s: float = field(default_factory=lambda: _float("HINDSIGHT_REFLECT_TIMEOUT_S", 45.0))
     hindsight_prewarm: bool = field(default_factory=lambda: _bool("HINDSIGHT_PREWARM", True))
@@ -133,6 +136,7 @@ class Settings:
             "bank_id": self.hindsight_bank_id,
             "per_fleet_banks": self.hindsight_per_fleet_banks,
             "hindsight_timeout_s": self.hindsight_timeout_s,
+            "hindsight_retain_timeout_s": self.hindsight_retain_timeout_s,
             "groq_configured": self.groq_enabled,
             "groq_model": self.groq_model,
             "groq_baseline_model": self.groq_baseline_model or self.groq_model,

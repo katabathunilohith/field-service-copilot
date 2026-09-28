@@ -108,14 +108,19 @@ class Services:
     bulletins: BulletinService
     seed: dict[str, Any]
     health_cache: tuple[float, dict[str, Any]] | None = None
+    directives_cache: tuple[float, dict[str, Any]] | None = None
     runs: set[asyncio.Task] = field(default_factory=set)
 
 
-def build_services(cfg: Settings, *, llm: GroqClient | None = None, runtime_dir=RUNTIME_DIR) -> Services:
+def build_services(
+    cfg: Settings, *, llm: GroqClient | None = None, runtime_dir=RUNTIME_DIR, hindsight_transport=None,
+) -> Services:
+    """Wire the app. `hindsight_transport` lets tests point the real wrapper at a mock API."""
     seed = load_seed()
     events = EventLog()
     fallback = LocalMemoryStore(records_from_seed(seed), runtime_dir / "memory_journal.jsonl")
-    memory = HindsightMemory(cfg, event_log=events, fallback=fallback, acks_path=runtime_dir / "retain_acks.jsonl")
+    memory = HindsightMemory(cfg, event_log=events, fallback=fallback, acks_path=runtime_dir / "retain_acks.jsonl",
+                             transport=hindsight_transport)
     llm = llm or GroqClient(cfg)
     catalog = get_catalog()
     tickets = TicketLedger(runtime_dir / "tickets.jsonl")
@@ -359,13 +364,17 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
     @app.get("/api/memory/directives")
     async def directives(request: Request) -> dict[str, Any]:
         s = svc(request)
+        defaults = [d.payload() for d in bank_schema(all_bank_ids()[0]).directives]
         if not s.memory.enabled:
-            return {"source": "local", "items": [d.payload() for d in bank_schema(all_bank_ids()[0]).directives]}
+            return {"source": "local", "items": defaults}
+        if s.directives_cache and s.directives_cache[0] > time.time():
+            return s.directives_cache[1]
         try:
-            return {"source": "hindsight", "items": await s.memory.list_directives(all_bank_ids()[0])}
+            result = {"source": "hindsight", "items": await s.memory.list_directives(all_bank_ids()[0])}
         except (TimeoutError, HindsightError) as exc:
-            return {"source": "local", "error": str(exc)[:200],
-                    "items": [d.payload() for d in bank_schema(all_bank_ids()[0]).directives]}
+            return {"source": "local", "error": str(exc)[:200], "items": defaults}
+        s.directives_cache = (time.time() + 60, result)
+        return result
 
     # ----------------------------------------------------------- bulletins
     @app.get("/api/bulletins")
@@ -385,7 +394,9 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
     @app.post("/api/bulletins/{bulletin_id}/approve")
     async def approve_bulletin(bulletin_id: str, body: BulletinApproveBody, request: Request) -> dict[str, Any]:
         try:
-            return await svc(request).bulletins.approve(bulletin_id, body.approver.strip())
+            s = svc(request)
+            s.directives_cache = None  # approval installs a new directive
+            return await s.bulletins.approve(bulletin_id, body.approver.strip())
         except KeyError:
             raise HTTPException(404, f"Unknown bulletin {bulletin_id}") from None
 
