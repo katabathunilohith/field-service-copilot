@@ -35,6 +35,7 @@ from fleet.tickets import TicketLedger
 from memory.bank_schemas import all_bank_ids, bank_schema, load_seed, records_from_seed
 from memory.event_log import EventLog
 from memory.fallback_store import LocalMemoryStore
+from memory.field_notes import FieldNotes, seed_notes
 from memory.hindsight_wrapper import HindsightError, HindsightMemory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -95,6 +96,14 @@ class BulletinApproveBody(BaseModel):
     approver: str = Field(default="Service Manager", min_length=2, max_length=60)
 
 
+class NoteBody(BaseModel):
+    text: str = Field(min_length=8, max_length=500)
+    technician_id: str = Field(pattern=r"^Tech_[A-Za-z]{2,20}$")
+    unit_id: str = Field(max_length=12)
+    scope: Literal["unit", "site"] = "unit"
+    kind: Literal["site_rule", "hazard", "machine_quirk"] | None = None
+
+
 # ------------------------------------------------------------------ services
 @dataclass
 class Services:
@@ -110,6 +119,7 @@ class Services:
     health_cache: tuple[float, dict[str, Any]] | None = None
     directives_cache: tuple[float, dict[str, Any]] | None = None
     runs: set[asyncio.Task] = field(default_factory=set)
+    notes: FieldNotes | None = None
 
 
 def build_services(
@@ -118,15 +128,16 @@ def build_services(
     """Wire the app. `hindsight_transport` lets tests point the real wrapper at a mock API."""
     seed = load_seed()
     events = EventLog()
-    fallback = LocalMemoryStore(records_from_seed(seed), runtime_dir / "memory_journal.jsonl")
+    catalog = get_catalog()
+    fallback = LocalMemoryStore(records_from_seed(seed) + seed_notes(catalog), runtime_dir / "memory_journal.jsonl")
     memory = HindsightMemory(cfg, event_log=events, fallback=fallback, acks_path=runtime_dir / "retain_acks.jsonl",
                              transport=hindsight_transport)
     llm = llm or GroqClient(cfg)
-    catalog = get_catalog()
     tickets = TicketLedger(runtime_dir / "tickets.jsonl")
-    orchestrator = DiagnosticOrchestrator(llm=llm, memory=memory, catalog=catalog, tickets=tickets)
+    notes = FieldNotes(memory, catalog)
+    orchestrator = DiagnosticOrchestrator(llm=llm, memory=memory, catalog=catalog, tickets=tickets, notes=notes)
     bulletins = BulletinService(runtime_dir / "bulletins.jsonl", catalog, memory)
-    return Services(cfg, events, fallback, memory, llm, tickets, orchestrator, bulletins, seed)
+    return Services(cfg, events, fallback, memory, llm, tickets, orchestrator, bulletins, seed, notes=notes)
 
 
 class RateLimiter:
@@ -375,6 +386,26 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
             return {"source": "local", "error": str(exc)[:200], "items": defaults}
         s.directives_cache = (time.time() + 60, result)
         return result
+
+    # --------------------------------------------------------- field notes
+    @app.post("/api/notes")
+    async def add_note(body: NoteBody, request: Request) -> dict[str, Any]:
+        """Retain a site rule, hazard or equipment quirk for every technician who visits next."""
+        try:
+            return await svc(request).notes.add(
+                text=body.text, technician_id=body.technician_id, unit_id=body.unit_id.upper(),
+                scope=body.scope, kind=body.kind,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/api/briefing")
+    async def briefing(request: Request, unit_id: str = Query(..., max_length=12)) -> dict[str, Any]:
+        """Pre-visit briefing: what the fleet has noted about this unit and its site."""
+        try:
+            return await svc(request).notes.briefing(unit_id.upper())
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from None
 
     # ----------------------------------------------------------- bulletins
     @app.get("/api/bulletins")

@@ -29,6 +29,8 @@ COPILOT_SYSTEM = (
     "OEM step as the fallback. Quote hold counts (e.g. 'held 7 of 7') and cite who first confirmed the fix, for "
     "example (Tech_Dave, 2026-09-03, CHL-0417).\n"
     "- If memory lists cases where the field pattern was ruled out, say which measurement tells the cases apart.\n"
+    "- If FIELD NOTES list hazards or site access rules, start the Recommended procedure with a one-line 'Before you "
+    "start' that states them and who noted them. Mention equipment quirks at the step they affect.\n"
     "- Telemetry and memory statistics are already in the context, so answer directly. Tools are optional: use "
     "verify_fix_outcome only for a fix the statistics do not cover, and fetch_unit_telemetry only for another unit. "
     "A work order is filed automatically from your answer.\n"
@@ -127,6 +129,7 @@ def build_context(
     delta: dict[str, Any] | None,
     reflection: str | None,
     memory_source: str | None,
+    notes: str | None = None,
 ) -> str:
     equipment = (
         f"{parsed.get('model_name') or 'model not identified'} · unit {parsed.get('unit_id') or 'not identified'} · "
@@ -144,6 +147,8 @@ def build_context(
         sections.append(f"FLEET MEMORY (source: {memory_source}):\n{body}")
     if delta is not None:
         sections.append(f"OUTCOME STATISTICS FROM MEMORY:\n{fmt_stats(delta)}")
+    if notes:
+        sections.append(f"FIELD NOTES FROM TECHNICIANS (site rules, hazards, equipment quirks):\n{notes}")
     if reflection:
         sections.append(f"REFLECTION (patterns learned over time):\n{_clip(reflection, 900)}")
     return "\n\n".join(sections)

@@ -170,6 +170,36 @@ export interface RetainResult {
   record?: Record<string, unknown>;
 }
 
+export type NoteKind = "site_rule" | "hazard" | "machine_quirk";
+
+export interface FieldNote {
+  id: string;
+  kind: NoteKind;
+  text: string;
+  technician: string | null;
+  role: string;
+  date: string;
+  unit_id: string | null;
+  scope: "unit" | "site";
+  site: string;
+  source: "hindsight" | "syncing" | "local";
+}
+
+export interface Briefing {
+  unit_id: string;
+  site: string;
+  items: FieldNote[];
+  source: "hindsight" | "local_fallback";
+  status: string;
+  latency_ms: number;
+}
+
+export interface SavedNote {
+  note: FieldNote;
+  retain: RetainResult;
+  redactions: string[];
+}
+
 export interface MemoryView {
   bank_id: string;
   source: "hindsight" | "local_fallback" | "mixed";
@@ -177,6 +207,7 @@ export interface MemoryView {
   hits: MemoryHit[];
   delta: MemoryDelta | null;
   reflection: Reflection | null;
+  briefing?: Briefing | null;
   retain: RetainResult | null;
 }
 
@@ -352,6 +383,7 @@ export type StreamEvent =
   | { event: "tool"; data: Partial<ToolTrace> & { phase: "start" | "done"; name: string } }
   | { event: "recall"; data: { status: "start" | "done"; source?: string; count?: number; latency_ms?: number; recalls?: { label: string; source: string; status: string; latency_ms: number; hits: number }[]; delta?: MemoryDelta | null } }
   | { event: "reflect"; data: { status: string; source: string; cached: boolean; trigger: string } }
+  | { event: "briefing"; data: { count: number; source: string; site: string; items: FieldNote[] } }
   | { event: "llm"; data: { round: number; status: string; model: string } }
   | { event: "llm_wait"; data: { seconds: number; reason: string } }
   | { event: "answer"; data: { text: string; citations: CitationReport | null } }

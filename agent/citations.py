@@ -31,6 +31,7 @@ def normalize_text(text: str) -> str:
 def normalize_markdown(answer: str) -> str:
     """Tidy model output: plain hyphens, and headings the model wrapped in bold (**### X**)."""
     text = normalize_text(answer)
+    text = re.sub(r"\s?【[^】\n]{0,40}】", "", text)  # gpt-oss's internal source markers mean nothing to a reader
     return re.sub(r"^\s*\*\*\s*(#{1,4}\s[^*\n]+?)\s*\*\*\s*$", r"\1", text, flags=re.MULTILINE)
 
 

@@ -20,7 +20,10 @@ from config import DATA_DIR, settings
 
 FLEETS = ("chillers", "solar", "elevators")
 
-RecordType = Literal["repair", "diagnosis", "outcome"]
+RecordType = Literal["repair", "diagnosis", "outcome", "note"]
+
+# Field notes: tribal knowledge that is not a repair outcome.
+NOTE_KINDS = {"site_rule": "site rule", "hazard": "hazard", "machine_quirk": "equipment quirk"}
 
 
 # --------------------------------------------------------------------------- banks
@@ -111,6 +114,12 @@ DIRECTIVES: tuple[Directive, ...] = (
         80,
     ),
     Directive(
+        "surface-site-constraints",
+        "When technicians' field notes record hazards or site access rules for the site or unit, state them before "
+        "any procedure steps, crediting who noted them.",
+        75,
+    ),
+    Directive(
         "no-invented-data",
         "Never invent part numbers, torque values, measurements or hold rates that are not present in memory.",
         70,
@@ -197,7 +206,8 @@ def parse_outcome(value: str | None) -> bool | None:
 # ------------------------------------------------------------------- records
 @dataclass
 class RepairRecord:
-    """One retained memory: a repair visit, a Copilot diagnosis, or an outcome confirmation."""
+    """One retained memory: a repair visit, a Copilot diagnosis, an outcome confirmation, or a
+    technician's field note (a site rule, hazard or equipment quirk; see memory/field_notes.py)."""
 
     record_id: str
     record_type: RecordType
@@ -221,10 +231,13 @@ class RepairRecord:
     knowledge_source: str = ""
     learned_from_technician: str = ""
     extra_tags: list[str] = field(default_factory=list)
+    note_kind: str = ""  # field notes only: site_rule | hazard | machine_quirk
 
     # ---- derived views -------------------------------------------------------
     @property
     def tags(self) -> list[str]:
+        if self.record_type == "note":
+            return self._note_tags()
         tags = [
             model_tag(self.model_key),
             error_tag(self.error_code),
@@ -238,9 +251,32 @@ class RepairRecord:
         ]
         return tags + [t for t in self.extra_tags if t not in tags]
 
+    def _note_tags(self) -> list[str]:
+        # A site-wide note has no unit tag, so it surfaces for every unit at that site.
+        tags = [f"site:{slug(self.site)}", "record:note", f"note:{self.note_kind}", tech_tag(self.technician_id)]
+        if self.unit_id:
+            tags.append(unit_tag(self.unit_id))
+        if self.model_key:
+            tags.append(model_tag(self.model_key))
+        if self.fleet:
+            tags.append(f"fleet:{self.fleet}")
+        return tags + [t for t in self.extra_tags if t not in tags]
+
     @property
     def metadata(self) -> dict[str, str]:
         # Hindsight metadata values must be strings.
+        if self.record_type == "note":
+            return {
+                "record_type": "note",
+                "note_kind": self.note_kind,
+                "note_text": self.notes,
+                "technician": self.technician_id,
+                "technician_role": self.technician_role,
+                "unit_id": self.unit_id,
+                "site": self.site,
+                "model": self.model_key,
+                "occurred_at": self.occurred_at,
+            }
         return {
             "record_type": self.record_type,
             "work_order": self.work_order,
@@ -263,17 +299,24 @@ class RepairRecord:
 
     @property
     def entities(self) -> list[dict[str, str]]:
-        return [
+        entities = [
             {"text": self.technician_id, "type": "technician"},
             {"text": self.unit_id, "type": "equipment_unit"},
             {"text": self.model_name, "type": "equipment_model"},
             {"text": self.error_code, "type": "error_code"},
             {"text": self.site, "type": "site"},
         ]
+        return [e for e in entities if e["text"]]  # site-wide notes have no unit, model or code
 
     @property
     def content(self) -> str:
         """Narrative first (for fact extraction), structured summary last (for grounding)."""
+        if self.record_type == "note":
+            where = f"{self.site}, unit {self.unit_id}" + (f" ({self.model_name})" if self.model_name else "") if self.unit_id \
+                else f"{self.site} (applies to the whole site)"
+            kind = NOTE_KINDS.get(self.note_kind, "field note")
+            return (f"[Field note · {kind} · {self.occurred_at[:10]}] At {where}: {self.notes} "
+                    f"Reported by {self.technician_id} ({self.technician_role}) on {self.occurred_at[:10]}.")
         label = {"repair": "Field repair record", "diagnosis": "Copilot diagnosis session", "outcome": "Fix outcome confirmation"}[
             self.record_type
         ]

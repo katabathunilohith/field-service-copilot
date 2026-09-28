@@ -1,5 +1,6 @@
 import type {
   AgentRun,
+  Briefing,
   Bulletin,
   BulletinCandidate,
   Catalog,
@@ -11,8 +12,10 @@ import type {
   MemoryEvent,
   Mode,
   OutboxStatus,
+  NoteKind,
   OutcomeResponse,
   Reflection,
+  SavedNote,
   StreamEvent,
   Transcription,
   ViewMode,
@@ -134,10 +137,13 @@ export const api = {
     request<DiagnoseResponse>("/api/diagnose", { method: "POST", json: body }),
   diagnoseStream,
   prefetch: (query: string, technicianId: string, unitId: string | null) =>
-    request<{ started: number }>("/api/memory/prefetch", {
+    request<{ started: number; parsed?: AgentRun["parsed"] }>("/api/memory/prefetch", {
       method: "POST",
       json: { query, technician_id: technicianId, unit_id: unitId },
-    }).catch(() => ({ started: 0 })), // best effort: a failed prefetch only means a cold recall
+    }).catch(() => ({ started: 0, parsed: undefined })), // best effort: a failed prefetch only means a cold recall
+  briefing: (unitId: string) => request<Briefing>(`/api/briefing?unit_id=${encodeURIComponent(unitId)}`),
+  addNote: (body: { text: string; technician_id: string; unit_id: string; scope: "unit" | "site"; kind: NoteKind }) =>
+    request<SavedNote>("/api/notes", { method: "POST", json: body }),
   transcribe: async (audio: Blob, filename: string): Promise<Transcription> => {
     const form = new FormData();
     form.append("audio", audio, filename);
