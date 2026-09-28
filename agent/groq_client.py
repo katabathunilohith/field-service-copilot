@@ -34,7 +34,6 @@ log = logging.getLogger("copilot.llm")
 
 
 class LLMUnavailable(Exception):
-    """Raised when no LLM is configured or it keeps failing after retries."""
 
 
 class ToolArgumentError(ValueError):
