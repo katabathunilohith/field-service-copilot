@@ -1,6 +1,6 @@
 # Field Service Copilot
 
-A diagnostic copilot for technicians repairing commercial HVAC chillers, solar inverters and elevator hoists. Its value isn't chat. It's **learning that persists across sessions and across technicians**, backed by [Hindsight](https://hindsight.vectorize.io) long-term memory
+A diagnostic copilot for technicians repairing commercial HVAC chillers, solar inverters and elevator hoists. Its value isn't chat. It's **learning that persists across sessions and across technicians**, backed by [Hindsight](https://hindsight.vectorize.io) long-term memory.
 
 > **The story the seeded data tells.** On 1 Sept, junior tech Alex follows the OEM manual for a Carrier 30XA `E-412` and replaces a $4,850 inverter board. The fault comes back. On 3 Sept, senior tech Dave finds the real cause: a loose, vibration-chafed J4 harness. That finding is retained. On 8 Sept, Alex hits `E-412` on a different chiller. The Copilot recalls Dave's finding, Alex checks the harness first, and it holds. When Alex confirms the outcome, the hold count goes up for Sarah's next session. Across the fleet, first-time-fix climbs from **61% in week 1 to 94% in week 4**, computed from the work orders rather than hardcoded.
 
