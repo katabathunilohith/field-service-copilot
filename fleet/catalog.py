@@ -15,7 +15,7 @@ from memory.bank_schemas import now_iso
 _UNIT_RE = re.compile(r"\b(CHL|INV|ELV)[\s-]?(\d{4})\b", re.IGNORECASE)
 _CODE_RE = re.compile(r"\b([A-Z]{1,3})\s?-?\s?(\d{2,3})\b", re.IGNORECASE)
 # Only an explicit "Tech_Name" counts; a bare name ("Dave's fix") refers to someone else.
-_TECH_RE = re.compile(r"\btech[\s_-]([a-z]{2,20})\b", re.IGNORECASE)
+_TECH_RE = re.compile(r"\btech[\s_,.-]+([a-z]{2,20})\b", re.IGNORECASE)
 
 
 @dataclass

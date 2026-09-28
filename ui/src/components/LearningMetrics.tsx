@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { api, formatDate, pct } from "../api";
 import type { FleetMetrics, KnowledgeTransfer, WeekMetric } from "../types";
+import BenchmarkCard from "./BenchmarkCard";
 import { Badge, Icon, Spinner } from "./ui";
 
 function useWidth<T extends HTMLElement>() {
@@ -86,6 +87,8 @@ export default function LearningMetrics({ refreshKey }: { refreshKey: number }) 
         </div>
         {showTable ? <WeekTable weeks={data.weeks} /> : <WeeklyCharts weeks={data.weeks} />}
       </section>
+
+      <BenchmarkCard />
 
       <div className="grid gap-5 xl:grid-cols-[1.6fr_1fr]">
         <PeerLedger transfers={data.knowledge_transfers} period={[first.start, last.end]} />

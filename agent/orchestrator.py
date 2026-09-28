@@ -3,31 +3,41 @@
 Two agents share the same LLM and tools so the comparison is fair:
 * baseline: OEM manual + telemetry only, no memory, nothing retained
 * copilot:  adds Hindsight recall/reflect, outcome verification, ticketing and post-run retain
+
+Every stage can be streamed to the UI through an optional `emit(event, data)` callback.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from agent.groq_client import GroqClient, LLMUnavailable
+from agent.citations import normalize_markdown, verify_citations
+from agent.groq_client import GroqClient, LLMUnavailable, ToolCall
 from agent.prompts import BASELINE_SYSTEM, COPILOT_SYSTEM, build_context, render_fallback_brief
-from agent.tools import BASELINE_TOOLS, COPILOT_TOOLS, ToolContext, ToolExecutor, tool_result_message, tool_specs
+from agent.tools import (
+    BASELINE_TOOLS, COPILOT_TOOLS, TICKET_TOOL, ToolContext, ToolExecutor, tool_result_message, tool_specs,
+)
 from fleet.catalog import Catalog, ParsedQuery
 from fleet.tickets import TicketLedger
-from memory.bank_schemas import RepairRecord, context_tags, now_iso, resolve_bank_id, unit_tag
+from memory.bank_schemas import RepairRecord, now_iso, resolve_bank_id, unit_tag
 from memory.hindsight_wrapper import HindsightMemory, RecallOutcome
-from memory.insights import MemoryHit, memory_delta, summarize_outcomes
+from memory.insights import MemoryHit, OutcomeSummary, memory_delta, summarize_outcomes
 
 log = logging.getLogger("copilot.agent")
 
 Mode = Literal["baseline", "copilot"]
-MAX_TOOL_ROUNDS = 6
+Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
+MAX_TOOL_ROUNDS = 4
 MAX_HISTORY_TURNS = 6
+REFLECT_WAIT_S = 0.3  # a diagnosis never waits on a cold reflect; it runs in the background instead
 
 
 @dataclass
@@ -37,6 +47,8 @@ class DiagnoseRequest:
     unit_id: str | None = None
     # Conversation so far, per pane: {"baseline": [...], "copilot": [...]}
     history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Read-only run (evaluation): no ticket is filed and nothing is retained to memory.
+    dry_run: bool = False
 
 
 def _new_run_id(mode: str) -> str:
@@ -45,31 +57,62 @@ def _new_run_id(mode: str) -> str:
 
 def _clean_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
     turns = [
-        {"role": h["role"], "content": str(h.get("content", ""))[:2000]}
+        {"role": h["role"], "content": str(h.get("content", ""))[:1500]}
         for h in history or []
         if isinstance(h, dict) and h.get("role") in ("user", "assistant") and h.get("content")
     ]
     return turns[-MAX_HISTORY_TURNS:]
 
 
-def _merge_hits(primary: list[MemoryHit], *secondary: list[MemoryHit], limit: int = 12, primary_share: int = 8) -> list[MemoryHit]:
-    """Fleet-history hits first, then unit-history hits, de-duplicated by source document."""
-    seen: set[str] = set()
-    merged: list[MemoryHit] = []
+def select_prompt_hits(fleet: list[MemoryHit], unit: list[MemoryHit], *, observations: int = 3,
+                       facts: int = 3, unit_facts: int = 2) -> list[MemoryHit]:
+    """Pick a small, diverse set for the prompt: consolidated observations first, then the
+    strongest individual facts, then this unit's own history. De-duplicated by source."""
+    chosen: list[MemoryHit] = []
+    seen_docs: set[str] = set()
+    seen_text: set[str] = set()
 
-    def take(hits: list[MemoryHit], cap: int) -> None:
-        for hit in hits:
-            key = hit.document_id or hit.id
-            if len(merged) >= cap or key in seen:
+    def signature(hit: MemoryHit) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", hit.text.lower())[:110]
+
+    def take(candidates: list[MemoryHit], cap: int) -> None:
+        taken = 0
+        for hit in candidates:
+            if taken >= cap:
+                return
+            doc, sig = hit.document_id or hit.id, signature(hit)
+            if doc in seen_docs or sig in seen_text:
                 continue
-            seen.add(key)
-            merged.append(hit)
+            seen_docs.add(doc)
+            seen_text.add(sig)
+            chosen.append(hit)
+            taken += 1
 
-    take(primary, primary_share if secondary else limit)
-    for group in secondary:
-        take(group, limit)
-    take(primary, limit)  # backfill if the secondary recalls came back thin
-    return merged
+    by_score = sorted(fleet, key=lambda h: -h.score)
+    take([h for h in by_score if h.type == "observation"], observations)  # consolidated knowledge first
+    take([h for h in by_score if h.type != "observation"], facts)
+    take(sorted(unit, key=lambda h: -h.score), unit_facts)
+    return chosen
+
+
+def should_reflect(summary: OutcomeSummary, manual_held: int) -> tuple[bool, str]:
+    """Reflect only when memory contradicts the manual; it is the expensive call."""
+    manual_failures = sum(s.attempts - s.held for s in summary.manual)
+    best_field = summary.field[0] if summary.field else None
+    if manual_failures >= 2:
+        return True, f"OEM steps failed {manual_failures}× in memory"
+    if best_field and best_field.held >= 3 and best_field.held > manual_held:
+        return True, "field fix outperforms the manual"
+    return False, ""
+
+
+async def _safe_emit(emit: Emit | None, event: str, data: dict[str, Any]) -> None:
+    if emit is None:
+        return
+    try:
+        await emit(event, data)
+    except Exception:  # a disconnected client must never break the diagnosis
+        log.debug("emit %s failed", event, exc_info=True)
 
 
 class DiagnosticOrchestrator:
@@ -88,7 +131,7 @@ class DiagnosticOrchestrator:
             raise ValueError(f"unknown mode '{mode}'")
         return {"mode": mode, mode: await self.run(req, mode)}  # type: ignore[arg-type]
 
-    async def run(self, req: DiagnoseRequest, mode: Mode) -> dict[str, Any]:
+    async def run(self, req: DiagnoseRequest, mode: Mode, emit: Emit | None = None) -> dict[str, Any]:
         started = time.perf_counter()
         run_id = _new_run_id(mode)
         parsed = self.catalog.parse(req.query, unit_hint=req.unit_id, technician_hint=req.technician_id)
@@ -98,44 +141,66 @@ class DiagnosticOrchestrator:
         warnings: list[str] = []
         if not parsed.complete:
             warnings.append("Could not identify both the equipment model and a known error code from the question.")
+        await _safe_emit(emit, "parsed", {"run_id": run_id, "mode": mode, "parsed": parsed.to_dict(), "technician": technician})
+
+        allowed = list(COPILOT_TOOLS if mode == "copilot" else BASELINE_TOOLS)
+        if manual is not None:
+            allowed.remove("lookup_service_manual")  # the manual section is already in the context
+        tool_ctx = ToolContext(
+            run_id=run_id, technician_id=technician_id, catalog=self.catalog,
+            memory=self.memory if mode == "copilot" else None,
+            tickets=self.tickets if mode == "copilot" else None,
+            allowed=allowed,
+        )
+        executor = ToolExecutor(tool_ctx)
+
+        # Telemetry is needed on every run, so fetch it up front instead of spending an LLM round on it.
+        telemetry = None
+        if parsed.unit_id:
+            args = {"unit_id": parsed.unit_id, "window_hours": 24}
+            telemetry = await executor.execute(
+                ToolCall("prefetch-telemetry", "fetch_unit_telemetry", args, json.dumps(args)), prefetched=True
+            )
+            await _safe_emit(emit, "tool", {"phase": "done", **tool_ctx.trace[-1], "result": None})
 
         memory_view: dict[str, Any] | None = None
         hits: list[MemoryHit] | None = None
         delta: dict[str, Any] | None = None
         reflection_text: str | None = None
         timings: dict[str, int] = {}
-
         if mode == "copilot":
-            memory_view, hits, delta, reflection_text, timings = await self._gather_memory(req.query, parsed, run_id)
+            memory_view, hits, delta, reflection_text, timings = await self._gather_memory(req.query, parsed, run_id, emit)
 
         context = build_context(
-            technician=technician, parsed=parsed.to_dict(), manual=manual, hits=hits, delta=delta,
-            reflection=reflection_text, memory_source=(memory_view or {}).get("source"),
-        )
-        tool_ctx = ToolContext(
-            run_id=run_id, technician_id=technician_id, catalog=self.catalog,
-            memory=self.memory if mode == "copilot" else None,
-            tickets=self.tickets if mode == "copilot" else None,
-            allowed=COPILOT_TOOLS if mode == "copilot" else BASELINE_TOOLS,
+            technician=technician, parsed=parsed.to_dict(), manual=manual,
+            telemetry=telemetry if telemetry and "error" not in telemetry else None,
+            hits=hits, delta=delta, reflection=reflection_text, memory_source=(memory_view or {}).get("source"),
         )
 
         llm_started = time.perf_counter()
-        llm_info: dict[str, Any] = {"model": self.llm.model, "rounds": 0, "usage": {}, "recoveries": []}
+        model = self.llm.model if mode == "copilot" else self.llm.baseline_model
+        llm_info: dict[str, Any] = {"model": model, "rounds": 0, "usage": {}, "recoveries": [], "waits": []}
         try:
-            answer = await self._tool_loop(mode, context, req, tool_ctx, llm_info)
+            answer = await self._tool_loop(mode, model, context, req, executor, llm_info, emit)
         except LLMUnavailable as exc:
             warnings.append(f"LLM unavailable: {exc}")
             llm_info["error"] = str(exc)
             answer = render_fallback_brief(mode=mode, parsed=parsed.to_dict(), manual=manual, delta=delta, reason=str(exc))
         timings["llm_ms"] = int((time.perf_counter() - llm_started) * 1000)
+        answer = normalize_markdown(answer)
+        citations = verify_citations(answer, self.memory.fallback.all_records()) if mode == "copilot" else None
+        await _safe_emit(emit, "answer", {"text": answer, "citations": citations})
 
-        retain_view = None
-        if mode == "copilot":
-            ticket = tool_ctx.ticket or self._auto_ticket(parsed, technician_id, delta, manual, answer, run_id)
+        if mode == "copilot" and not req.dry_run:
+            ticket = await self._file_ticket(answer, parsed, technician_id, delta, manual, run_id, executor, llm_info)
             tool_ctx.ticket = ticket
+            if ticket:
+                await _safe_emit(emit, "ticket", {"ticket": ticket})
             retain_view = await self._retain_session(parsed, technician, ticket, delta, run_id, warnings)
             if memory_view is not None:
                 memory_view["retain"] = retain_view
+            if retain_view:
+                await _safe_emit(emit, "retain", {k: retain_view.get(k) for k in ("status", "source", "operation_id", "error")})
 
         timings["total_ms"] = int((time.perf_counter() - started) * 1000)
         return {
@@ -147,6 +212,7 @@ class DiagnosticOrchestrator:
             "answer": answer,
             "memory": memory_view,
             "tool_calls": tool_ctx.trace,
+            "citations": citations,
             "ticket": tool_ctx.ticket,
             "llm": llm_info,
             "timings": timings,
@@ -207,63 +273,107 @@ class DiagnosticOrchestrator:
         )
         return result.to_dict()
 
+    def prefetch(self, query: str, *, unit_hint: str | None, technician_hint: str | None) -> dict[str, Any]:
+        """Warm the recall cache while the technician is still typing."""
+        parsed = self.catalog.parse(query, unit_hint=unit_hint, technician_hint=technician_hint)
+        if not parsed.complete:
+            return {"started": 0, "parsed": parsed.to_dict()}
+        bodies = [self.memory.outcome_recall_body(parsed.model_key, parsed.error_code, parsed.error_title or "",
+                                                  parsed.model_name or "")]
+        if parsed.unit_id:
+            query_text, tags, kwargs = self._unit_recall_args(parsed.unit_id)
+            bodies.append(self.memory.recall_body(query_text, tags, **kwargs))
+        started = self.memory.prefetch(resolve_bank_id(parsed.fleet), bodies)
+        return {"started": started, "parsed": parsed.to_dict()}
+
+    def reflection_candidates(self) -> list[dict[str, str]]:
+        """Model/error pairs whose memory contradicts the manual: worth prewarming a reflection for."""
+        pairs = []
+        for model_key, model in self.catalog.models.items():
+            for code, spec in model["error_codes"].items():
+                summary = summarize_outcomes(self.memory.fallback.outcome_hits(model_key, code))
+                primary = spec["manual"]["primary_action"]
+                manual_held = next((s.held for s in summary.manual if s.action == primary), 0)
+                if should_reflect(summary, manual_held)[0]:
+                    pairs.append({"bank_id": resolve_bank_id(model["fleet"]), "model_key": model_key, "error_code": code,
+                                  "model_name": model["name"], "error_title": spec["title"]})
+        return pairs
+
     # ============================================================== memory phase
+    @staticmethod
+    def _unit_recall_args(unit_id: str) -> tuple[str, list[str], dict[str, Any]]:
+        return (
+            f"Service history of unit {unit_id}: recurring faults, prior repairs and whether they held.",
+            [unit_tag(unit_id)],
+            {"budget": "low", "max_tokens": 1500, "tags_match": "any_strict"},
+        )
+
     async def _gather_memory(
-        self, query: str, parsed: ParsedQuery, run_id: str
+        self, query: str, parsed: ParsedQuery, run_id: str, emit: Emit | None
     ) -> tuple[dict[str, Any], list[MemoryHit], dict[str, Any] | None, str | None, dict[str, int]]:
         bank_id = resolve_bank_id(parsed.fleet)
         started = time.perf_counter()
+        await _safe_emit(emit, "recall", {"status": "start", "bank_id": bank_id})
 
-        recalls: list[Any] = []
+        # One recall feeds both the prompt and the hold-rate statistics; the unit recall runs alongside.
+        calls: list[Any] = []
         if parsed.complete:
-            fleet_query = (
-                f"{parsed.model_name} {parsed.error_code} {parsed.error_title}: root causes found in the field, "
-                f"OEM manual procedures that failed, fixes that held. Technician question: {query}"
-            )
-            recalls.append(self.memory.recall_context(
-                bank_id, fleet_query, context_tags(parsed.model_key, parsed.error_code), run_id=run_id, label="fleet history"))
+            calls.append(self.memory.fix_outcome_hits(
+                bank_id, parsed.model_key, parsed.error_code, error_title=parsed.error_title or "",
+                model_name=parsed.model_name or "", run_id=run_id))
         else:
-            recalls.append(self.memory.recall_context(bank_id, query, None, run_id=run_id, label="open recall"))
+            calls.append(self.memory.recall_context(bank_id, query, None, run_id=run_id, label="open recall"))
         if parsed.unit_id:
-            recalls.append(self.memory.recall_context(
-                bank_id, f"Service history of unit {parsed.unit_id}: recurring faults, prior repairs and whether they held.",
-                [unit_tag(parsed.unit_id)], run_id=run_id, tags_match="any_strict", limit=8, label="unit history"))
-        extra = [self.memory.fix_outcome_hits(bank_id, parsed.model_key, parsed.error_code, run_id=run_id)] if parsed.complete else []
+            query_text, tags, kwargs = self._unit_recall_args(parsed.unit_id)
+            calls.append(self.memory.recall_context(bank_id, query_text, tags, run_id=run_id, limit=8,
+                                                    label="unit history", **kwargs))
+        results = await asyncio.gather(*calls)
 
-        # All recalls share one wall-clock budget because they run concurrently.
-        results = await asyncio.gather(*recalls, *extra)
-        recall_outcomes: list[RecallOutcome] = list(results[: len(recalls)])
-        hits = _merge_hits(*(r.hits for r in recall_outcomes))
+        if parsed.complete:
+            stats_hits, fleet_recall, stats_source = results[0]
+        else:
+            fleet_recall, stats_hits, stats_source = results[0], [], "none"
+        unit_recall: RecallOutcome | None = results[1] if parsed.unit_id else None
+        recall_outcomes = [fleet_recall] + ([unit_recall] if unit_recall else [])
+        hits = select_prompt_hits(fleet_recall.hits, unit_recall.hits if unit_recall else [])
         timings = {"recall_ms": int((time.perf_counter() - started) * 1000)}
 
         delta: dict[str, Any] | None = None
         reflection_dict: dict[str, Any] | None = None
         reflection_text: str | None = None
-        if extra:
-            outcome_hits, _, stats_source = results[-1]
-            summary = summarize_outcomes(outcome_hits, parsed.unit_id)
+        if parsed.complete:
+            summary = summarize_outcomes(stats_hits, parsed.unit_id)
             manual = self.catalog.manual(parsed.model_key, parsed.error_code)
             delta = memory_delta(summary, manual["primary_action"] if manual else None, stats_source, parsed.site)
 
-            # Reflect only when memory contradicts the manual; it is the expensive call.
-            manual_failures = sum(s.attempts - s.held for s in summary.manual)
-            best_field = summary.field[0] if summary.field else None
-            contradicts_manual = bool(best_field and best_field.held >= 3 and best_field.held > delta["manual_held"])
-            if manual_failures >= 2 or contradicts_manual:
+        sources = {r.source for r in recall_outcomes}
+        source = "hindsight" if sources == {"hindsight"} else ("local_fallback" if sources == {"local_fallback"} else "mixed")
+        await _safe_emit(emit, "recall", {
+            "status": "done", "source": source, "count": len(hits), "latency_ms": timings["recall_ms"],
+            "recalls": [{"label": r.label, "source": r.source, "status": r.status, "latency_ms": r.latency_ms,
+                         "hits": len(r.hits)} for r in recall_outcomes],
+            "delta": delta,
+        })
+
+        if parsed.complete and delta is not None:
+            do_reflect, trigger = should_reflect(summarize_outcomes(stats_hits), delta["manual_held"])
+            if do_reflect:
                 reflect_started = time.perf_counter()
                 reflection = await self.memory.reflect_patterns(
-                    bank_id, parsed.model_key, parsed.error_code,
-                    model_name=parsed.model_name or "", error_title=parsed.error_title or "", run_id=run_id,
+                    bank_id, parsed.model_key, parsed.error_code, model_name=parsed.model_name or "",
+                    error_title=parsed.error_title or "", run_id=run_id, wait_s=REFLECT_WAIT_S,
                 )
                 timings["reflect_ms"] = int((time.perf_counter() - reflect_started) * 1000)
-                reflection_text = reflection.text
-                trigger = f"OEM steps failed {manual_failures}× in memory" if manual_failures >= 2 else "field fix outperforms the manual"
+                # The local synthesis restates the outcome statistics already in the prompt; only
+                # Hindsight's own synthesis adds information worth the tokens.
+                reflection_text = reflection.text if reflection.source == "hindsight" else None
                 reflection_dict = {**reflection.to_dict(), "trigger": trigger}
+                await _safe_emit(emit, "reflect", {"status": reflection.status, "source": reflection.source,
+                                                   "cached": reflection.cached, "trigger": trigger})
 
-        sources = {r.source for r in recall_outcomes}
         view = {
             "bank_id": bank_id,
-            "source": "hindsight" if sources == {"hindsight"} else ("local_fallback" if sources == {"local_fallback"} else "mixed"),
+            "source": source,
             "recalls": [r.to_dict() for r in recall_outcomes],
             "hits": [h.to_dict() for h in hits],
             "delta": delta,
@@ -274,27 +384,37 @@ class DiagnosticOrchestrator:
 
     # ================================================================ LLM phase
     async def _tool_loop(
-        self, mode: Mode, context: str, req: DiagnoseRequest, tool_ctx: ToolContext, info: dict[str, Any]
+        self, mode: Mode, model: str, context: str, req: DiagnoseRequest, executor: ToolExecutor,
+        info: dict[str, Any], emit: Emit | None,
     ) -> str:
         if not self.llm.available:
             raise LLMUnavailable("GROQ_API_KEY is not configured")
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": COPILOT_SYSTEM if mode == "copilot" else BASELINE_SYSTEM},
-            {"role": "system", "content": f"Context for this diagnosis:\n\n{context}"},
+            {"role": "system", "content": f"CONTEXT\n{context}"},
             *_clean_history(req.history.get(mode, [])),
             {"role": "user", "content": req.query},
         ]
-        tools = tool_specs(tool_ctx.allowed)
-        executor = ToolExecutor(tool_ctx)
-        usage: dict[str, int] = {}
+        tools = tool_specs([t for t in executor.ctx.allowed if t != TICKET_TOOL])
+        usage: dict[str, int] = info["usage"]
+
+        async def on_wait(seconds: float, reason: str) -> None:
+            info["waits"].append({"seconds": round(seconds, 1), "reason": reason})
+            await _safe_emit(emit, "llm_wait", {"seconds": round(seconds, 1), "reason": reason})
+
+        async def complete(tool_choice: str) -> Any:
+            turn = await self.llm.complete(messages, tools=tools, tool_choice=tool_choice, model=model,
+                                           max_tokens=1400, on_wait=on_wait)
+            for k, v in turn.usage.items():
+                usage[k] = usage.get(k, 0) + (v or 0)
+            info["usage"] = usage
+            return turn
 
         for round_no in range(1, MAX_TOOL_ROUNDS + 1):
             final_round = round_no == MAX_TOOL_ROUNDS
-            turn = await self.llm.complete(messages, tools=tools, tool_choice="none" if final_round else "auto")
+            await _safe_emit(emit, "llm", {"round": round_no, "status": "thinking", "model": model})
+            turn = await complete("none" if final_round else "auto")
             info["rounds"] = round_no
-            for k, v in turn.usage.items():
-                usage[k] = usage.get(k, 0) + v
-            info["usage"] = usage
             if turn.recovered_from:
                 info["recoveries"].append({"round": round_no, "kind": turn.recovered_from})
             if not turn.tool_calls or final_round:
@@ -302,17 +422,65 @@ class DiagnosticOrchestrator:
                     return turn.content
                 break
             messages.append(turn.assistant_message())
+            for call in turn.tool_calls:
+                await _safe_emit(emit, "tool", {"phase": "start", "name": call.name, "arguments": call.arguments,
+                                                "repaired": call.repaired, "repair_notes": call.repair_notes})
             for call, result in await executor.execute_all(turn.tool_calls):
                 messages.append(tool_result_message(call, result))
+                trace = next((t for t in reversed(executor.ctx.trace) if t["id"] == call.id), None)
+                if trace:
+                    await _safe_emit(emit, "tool", {"phase": "done", **trace, "result": None})
 
         # The model stopped without prose (or ran out of rounds): ask once more, tools disabled.
         messages.append({"role": "user", "content": "Write the final answer now using the required sections."})
-        turn = await self.llm.complete(messages, tools=tools, tool_choice="none")
+        info["rounds"] += 1
+        turn = await complete("none")
         if not turn.content:
             raise LLMUnavailable("model returned an empty answer")
         return turn.content
 
     # ============================================================ post-run phase
+    async def _file_ticket(
+        self, answer: str, parsed: ParsedQuery, technician_id: str, delta: dict[str, Any] | None,
+        manual: dict[str, Any] | None, run_id: str, executor: ToolExecutor, info: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Turn the answer into a structured work order with one small, forced function call.
+
+        It runs after the answer is already on screen, costs a few hundred tokens instead of a
+        second full-context round, and falls back to a deterministic ticket if the LLM is unavailable."""
+        if not (parsed.complete and parsed.unit_id):
+            return None
+        if self.llm.available and not info.get("error"):
+            known = [f["action"] for f in (delta or {}).get("field_fixes", [])[:2]] + ([manual["primary_action"]] if manual else [])
+            messages = [
+                {"role": "system", "content": (
+                    "You file repair work orders. Call log_repair_ticket exactly once using only facts from the "
+                    "diagnosis. recommended_action is the first CORRECTIVE action the diagnosis recommends (the repair "
+                    "itself, never a lockout/tagout, isolation or inspection step); prefer the wording of a known fix "
+                    "when it matches. action_category is 'field' for a field-verified fix and 'manual' for an OEM "
+                    "manual step.")},
+                {"role": "user", "content": (
+                    f"Unit {parsed.unit_id}, error {parsed.error_code}. Known fixes: {'; '.join(known) or 'n/a'}.\n\n"
+                    f"Diagnosis:\n{answer[:2500]}")},
+            ]
+            try:
+                turn = await self.llm.complete(
+                    messages, tools=tool_specs([TICKET_TOOL]), model=self.llm.model, max_tokens=600,
+                    tool_choice={"type": "function", "function": {"name": TICKET_TOOL}},  # type: ignore[arg-type]
+                )
+                for k, v in turn.usage.items():
+                    info["usage"][k] = info["usage"].get(k, 0) + (v or 0)
+                for call in turn.tool_calls[:1]:
+                    if call.name == TICKET_TOOL:
+                        call.arguments.setdefault("unit_id", parsed.unit_id)
+                        call.arguments.setdefault("error_code", parsed.error_code)
+                        await executor.execute(call, stage="work order")
+            except LLMUnavailable as exc:
+                log.warning("work-order extraction failed: %s", exc)
+            if executor.ctx.ticket:
+                return executor.ctx.ticket
+        return self._auto_ticket(parsed, technician_id, delta, manual, answer, run_id)
+
     def _auto_ticket(
         self, parsed: ParsedQuery, technician_id: str, delta: dict[str, Any] | None,
         manual: dict[str, Any] | None, answer: str, run_id: str,
@@ -329,8 +497,7 @@ class DiagnosticOrchestrator:
         return self.tickets.create(
             unit_id=parsed.unit_id, model=parsed.model_key, error_code=parsed.error_code, technician_id=technician_id,
             diagnosis=diagnosis[:600], recommended_action=action[:400], canonical_action=action, action_category=category,
-            priority="normal",
-            parts=[], run_id=run_id, created_via="auto", answer_excerpt=answer[:400],
+            priority="normal", parts=[], run_id=run_id, created_via="auto", answer_excerpt=answer[:400],
         )
 
     async def _retain_session(
@@ -340,7 +507,7 @@ class DiagnosticOrchestrator:
         if not (parsed.complete and parsed.unit_id and ticket):
             warnings.append("No unit identified, so this session was not retained to memory.")
             return None
-        headline = (delta or {}).get("headline") or "no prior field history contradicted the manual"
+        headline = (delta or {}).get("headline") or "no prior field history contradicted the manual."
         record = RepairRecord(
             record_id=f"{ticket['id'].lower()}-diagnosis",
             record_type="diagnosis",

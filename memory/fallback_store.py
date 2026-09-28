@@ -33,13 +33,17 @@ class LocalMemoryStore:
         self._journal = journal_path
         self._lock = threading.Lock()
         self._records: list[RepairRecord] = []
+        self._runtime: list[RepairRecord] = []  # records written by this app (the retain outbox)
+        self._ids: set[str] = set()
         self._tokens: list[Counter[str]] = []
         self._df: Counter[str] = Counter()
         self._total_len = 0
         for record in seed_records:
             self._index(record)
         for record in self._read_journal():
-            self._index(record)
+            if record.record_id not in self._ids:
+                self._index(record)
+                self._runtime.append(record)
 
     # ------------------------------------------------------------- persistence
     def _read_journal(self) -> list[RepairRecord]:
@@ -54,15 +58,29 @@ class LocalMemoryStore:
                     continue  # a torn write must not take the fallback down
         return records
 
-    def add(self, record: RepairRecord) -> None:
+    def add(self, record: RepairRecord) -> bool:
+        """Journal and index a record. Idempotent by record_id; returns False for a duplicate."""
         with self._lock:
+            if record.record_id in self._ids:
+                return False
             self._journal.parent.mkdir(parents=True, exist_ok=True)
             with self._journal.open("a") as fh:
                 fh.write(json.dumps(record.to_dict()) + "\n")
             self._index(record)
+            self._runtime.append(record)
+            return True
+
+    def all_records(self) -> list[RepairRecord]:
+        with self._lock:
+            return list(self._records)
+
+    def runtime_records(self) -> list[RepairRecord]:
+        with self._lock:
+            return list(self._runtime)
 
     def _index(self, record: RepairRecord) -> None:
         tokens = Counter(tokenize(record.content))
+        self._ids.add(record.record_id)
         self._records.append(record)
         self._tokens.append(tokens)
         self._df.update(tokens.keys())
@@ -82,7 +100,7 @@ class LocalMemoryStore:
             and (not unit_id or r.unit_id == unit_id)
         ]
 
-    def search(self, query: str, tags: list[str] | None = None, limit: int = 12) -> list[MemoryHit]:
+    def search(self, query: str, tags: list[str] | None = None, limit: int | None = 12) -> list[MemoryHit]:
         with self._lock:
             records, token_rows = list(self._records), list(self._tokens)
         if not records:

@@ -21,6 +21,7 @@ import random
 import re
 import secrets
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,7 @@ class LLMTurn:
     latency_ms: int
     attempts: int = 1
     recovered_from: str | None = None
+    waited_s: float = 0.0
 
     def assistant_message(self) -> dict[str, Any]:
         """A clean assistant message for the next request (repaired arguments, no provider extras)."""
@@ -257,28 +259,108 @@ def extract_text_tool_calls(content: str, known: list[str]) -> list[tuple[str, s
     return found
 
 
+# ------------------------------------------------------------------ rate limit
+WaitCallback = Callable[[float, str], Awaitable[None]]
+
+
+class TokenBucket:
+    """Client-side view of Groq's per-model tokens-per-minute budget.
+
+    Groq reports the budget on every response (x-ratelimit-limit-tokens /
+    x-ratelimit-remaining-tokens) and refills it continuously. Tracking it lets the
+    client wait the few seconds a request needs instead of burning a 429 round trip,
+    and lets the UI tell the technician why it is waiting."""
+
+    def __init__(self) -> None:
+        self.limit: float | None = None
+        self.remaining: float | None = None
+        self.updated = time.monotonic()
+
+    def observe(self, headers: Mapping[str, str] | None) -> None:
+        if not headers:
+            return
+        try:
+            limit = float(headers.get("x-ratelimit-limit-tokens") or 0) or None
+            remaining = headers.get("x-ratelimit-remaining-tokens")
+        except (TypeError, ValueError):
+            return
+        if limit and remaining is not None:
+            try:
+                self.limit, self.remaining, self.updated = limit, float(remaining), time.monotonic()
+            except ValueError:
+                return
+
+    def available(self) -> float | None:
+        if self.limit is None or self.remaining is None:
+            return None
+        refill = (time.monotonic() - self.updated) * self.limit / 60.0
+        return min(self.limit, self.remaining + refill)
+
+    def reserve(self, tokens: float) -> float:
+        """Seconds to wait before `tokens` fit, and book them so concurrent calls see less."""
+        available = self.available()
+        if available is None or self.limit is None:
+            return 0.0
+        needed = min(tokens, self.limit * 0.95)
+        wait = max(0.0, (needed - available) / (self.limit / 60.0))
+        self.remaining, self.updated = available - needed, time.monotonic()
+        return wait
+
+
+def estimate_tokens(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, max_tokens: int) -> int:
+    """Rough prompt+completion estimate (~3.5 chars/token for this English/JSON mix)."""
+    chars = len(json.dumps(messages, ensure_ascii=False)) + len(json.dumps(tools or []))
+    return int(chars / 3.5) + min(max_tokens, 700)
+
+
 # ----------------------------------------------------------------------- client
 class GroqClient:
     RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+    MAX_THROTTLE_WAIT_S = 45.0
 
     def __init__(self, cfg: Settings = default_settings, *, client: AsyncOpenAI | None = None) -> None:
         self.cfg = cfg
         self.model = cfg.groq_model
+        self.baseline_model = cfg.groq_baseline_model or cfg.groq_model
         self._client = client
         if self._client is None and cfg.groq_api_key:
             # SDK retries are disabled so this class owns backoff policy and logging.
             self._client = AsyncOpenAI(api_key=cfg.groq_api_key, base_url=cfg.groq_base_url, max_retries=0, timeout=60.0)
+        self._buckets: dict[str, TokenBucket] = {}
+        self._bucket_lock = asyncio.Lock()
 
     @property
     def available(self) -> bool:
         return self._client is not None
 
-    async def _create(self, **kwargs: Any) -> dict[str, Any]:
-        """Single raw API call returning a plain dict (overridable in tests)."""
+    def bucket(self, model: str) -> TokenBucket:
+        return self._buckets.setdefault(model, TokenBucket())
+
+    def rate_status(self) -> dict[str, Any]:
+        return {
+            model: {"limit_tpm": b.limit, "available_tokens": round(b.available() or 0)}
+            for model, b in self._buckets.items()
+            if b.limit
+        }
+
+    async def _create(self, **kwargs: Any) -> dict[str, Any] | tuple[dict[str, Any], Mapping[str, str]]:
+        """Single raw API call returning (dict, headers). Tests may override it to return just a dict."""
         if self._client is None:
             raise LLMUnavailable("GROQ_API_KEY is not configured")
-        response = await self._client.chat.completions.create(**kwargs)
-        return response.model_dump()
+        raw = await self._client.chat.completions.with_raw_response.create(**kwargs)
+        return raw.parse().model_dump(), raw.headers
+
+    async def _throttle(self, model: str, tokens: int, on_wait: WaitCallback | None) -> float:
+        async with self._bucket_lock:
+            wait = self.bucket(model).reserve(tokens)
+        if wait > 0.25:
+            wait = min(wait, self.MAX_THROTTLE_WAIT_S)
+            log.info("Groq %s token budget: waiting %.1fs for ~%d tokens", model, wait, tokens)
+            if on_wait:
+                await on_wait(wait, f"Pacing for Groq's tokens-per-minute limit (~{tokens:,} tokens needed)")
+            await asyncio.sleep(wait)
+            return wait
+        return 0.0
 
     def _backoff(self, attempt: int, exc: Exception | None) -> float:
         retry_after = None
@@ -297,13 +379,16 @@ class GroqClient:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]] | None = None,
-        tool_choice: str = "auto",
+        tool_choice: str | dict[str, Any] = "auto",
         temperature: float = 0.2,
         max_tokens: int = 1800,
+        model: str | None = None,
+        on_wait: WaitCallback | None = None,
     ) -> LLMTurn:
+        model = model or self.model
         known = [t["function"]["name"] for t in tools or []]
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -311,19 +396,24 @@ class GroqClient:
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
-        if self.model.startswith("openai/gpt-oss") and self.cfg.groq_reasoning_effort:
+        if model.startswith("openai/gpt-oss") and self.cfg.groq_reasoning_effort:
             kwargs["reasoning_effort"] = self.cfg.groq_reasoning_effort
 
         start = time.perf_counter()
         nudged = False
         attempt = 0
+        waited = 0.0
         while True:
             attempt += 1
+            waited += await self._throttle(model, estimate_tokens(kwargs["messages"], tools, max_tokens), on_wait)
             try:
-                raw = await self._create(**kwargs)
+                result = await self._create(**kwargs)
+                raw, headers = result if isinstance(result, tuple) else (result, None)
+                self.bucket(model).observe(headers)
                 turn = self._normalize(raw, known)
                 turn.latency_ms = int((time.perf_counter() - start) * 1000)
                 turn.attempts = attempt
+                turn.waited_s = round(waited, 1)
                 return turn
             except openai.BadRequestError as exc:
                 error = self._error_body(exc)
@@ -346,8 +436,13 @@ class GroqClient:
             except (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError) as exc:
                 if attempt > self.cfg.groq_max_retries:
                     raise LLMUnavailable(f"Groq unavailable after {attempt} attempts: {type(exc).__name__}") from exc
+                response = getattr(exc, "response", None)
+                self.bucket(model).observe(response.headers if response is not None else None)
                 wait = self._backoff(attempt - 1, exc)
                 log.warning("Groq %s; retrying in %.1fs (attempt %d)", type(exc).__name__, wait, attempt)
+                if on_wait and isinstance(exc, openai.RateLimitError):
+                    await on_wait(wait, "Groq rate limit reached; retrying")
+                waited += wait
                 await asyncio.sleep(wait)
             except openai.APIStatusError as exc:
                 if exc.status_code in (401, 403):
@@ -413,3 +508,31 @@ class GroqClient:
             latency_ms=0,
             recovered_from=recovered_from,
         )
+
+    # ------------------------------------------------------------ speech to text
+    async def transcribe(self, audio: bytes, filename: str, content_type: str, *, prompt: str = "") -> dict[str, Any]:
+        """Whisper on Groq. `prompt` biases recognition toward fleet vocabulary (unit IDs, codes)."""
+        if self._client is None:
+            raise LLMUnavailable("GROQ_API_KEY is not configured")
+        model = self.cfg.groq_whisper_model
+        start = time.perf_counter()
+        for attempt in range(1, self.cfg.groq_max_retries + 2):
+            try:
+                result = await self._client.audio.transcriptions.create(
+                    model=model, file=(filename, audio, content_type), prompt=prompt[:800],
+                    response_format="verbose_json", temperature=0.0, language="en",
+                )
+                data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+                return {
+                    "text": (data.get("text") or "").strip(),
+                    "duration_s": data.get("duration"),
+                    "model": model,
+                    "latency_ms": int((time.perf_counter() - start) * 1000),
+                }
+            except (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError, openai.InternalServerError) as exc:
+                if attempt > self.cfg.groq_max_retries:
+                    raise LLMUnavailable(f"Transcription unavailable: {type(exc).__name__}") from exc
+                await asyncio.sleep(self._backoff(attempt - 1, exc))
+            except openai.APIStatusError as exc:
+                raise LLMUnavailable(f"Transcription failed ({exc.status_code}): {self._error_body(exc).get('message', '')}") from exc
+        raise LLMUnavailable("Transcription unavailable")

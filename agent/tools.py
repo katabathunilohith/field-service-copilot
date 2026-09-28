@@ -97,6 +97,10 @@ TOOL_SPECS: dict[str, dict[str, Any]] = {
 
 BASELINE_TOOLS = ["lookup_service_manual", "fetch_unit_telemetry"]
 COPILOT_TOOLS = ["lookup_service_manual", "fetch_unit_telemetry", "verify_fix_outcome", "log_repair_ticket"]
+# Tools offered during the diagnosis itself. log_repair_ticket is called in a separate, forced
+# function call after the answer (see orchestrator._file_ticket), which keeps the diagnosis to one
+# LLM round. The orchestrator also drops lookup_service_manual when the manual is already in context.
+TICKET_TOOL = "log_repair_ticket"
 
 _CODE = re.compile(r"^\s*([A-Za-z]{1,3})\s*-?\s*(\d{2,3})\s*$")
 _UNIT = re.compile(r"^\s*(CHL|INV|ELV)\s*-?\s*(\d{4})\s*$", re.IGNORECASE)
@@ -156,7 +160,7 @@ class ToolExecutor:
             "log_repair_ticket": self._log_repair_ticket,
         }
 
-    async def execute(self, call: ToolCall) -> dict[str, Any]:
+    async def execute(self, call: ToolCall, *, prefetched: bool = False, stage: str = "diagnosis") -> dict[str, Any]:
         start = time.perf_counter()
         if "__invalid__" in call.arguments:
             result = {"error": f"Arguments were not valid JSON ({call.arguments['__invalid__']}). Retry with a JSON object."}
@@ -184,6 +188,8 @@ class ToolExecutor:
             "latency_ms": int((time.perf_counter() - start) * 1000),
             "error": result.get("error"),
             "result": result,
+            "prefetched": prefetched,
+            "stage": "prefetch" if prefetched else stage,
         })
         return result
 
@@ -214,9 +220,12 @@ class ToolExecutor:
         model, code = str(args["model"]).strip().lower(), normalize_code(args["error_code"])
         unit = normalize_unit(args["unit_id"]) if args.get("unit_id") else None
         proposed = str(args["proposed_action"])
-        fleet = self.ctx.catalog.models.get(model, {}).get("fleet")
+        model_info = self.ctx.catalog.models.get(model, {})
+        spec = self.ctx.catalog.error_spec(model, code) or {}
+        # Same recall body as the orchestrator's, so this is normally served from cache.
         hits, recall, stats_source = await self.ctx.memory.fix_outcome_hits(
-            resolve_bank_id(fleet), model, code, query_hint=proposed, run_id=self.ctx.run_id
+            resolve_bank_id(model_info.get("fleet")), model, code,
+            error_title=spec.get("title", ""), model_name=model_info.get("name", ""), run_id=self.ctx.run_id,
         )
         summary = summarize_outcomes(hits, unit)
         groups = summary.manual + summary.field

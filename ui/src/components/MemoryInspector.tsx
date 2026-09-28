@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, formatDate } from "../api";
-import type { AgentRun, Catalog, MemoryEvent, MemoryHit, Reflection } from "../types";
+import type { AgentRun, Catalog, Directive, MemoryEvent, MemoryHit, OutboxStatus, Reflection } from "../types";
 import { Badge, Icon, JsonBlock, Markdown, OutcomeBadge, Spinner, statusTone } from "./ui";
 
-type Tab = "recalled" | "retain" | "reflect" | "raw";
+type Tab = "recalled" | "retain" | "reflect" | "guardrails" | "raw";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "recalled", label: "Recalled" },
   { id: "retain", label: "Retain log" },
   { id: "reflect", label: "Reflection" },
-  { id: "raw", label: "Raw events" },
+  { id: "guardrails", label: "Guardrails" },
+  { id: "raw", label: "Raw" },
 ];
 
 interface Props {
@@ -94,8 +95,9 @@ export default function MemoryInspector({ open, onClose, run, catalog, refreshKe
         <div className="flex-1 overflow-y-auto p-4" role="tabpanel">
           {error && <p className="mb-3 rounded-md bg-bad-wash px-3 py-2 text-sm text-bad-ink">{error}</p>}
           {tab === "recalled" && <Recalled run={run} />}
-          {tab === "retain" && <RetainLog events={retains} />}
+          {tab === "retain" && <RetainLog events={retains} onSynced={load} />}
           {tab === "reflect" && <ReflectionPanel key={run?.run_id ?? "none"} run={run} catalog={catalog} />}
+          {tab === "guardrails" && <Guardrails />}
           {tab === "raw" && <RawEvents events={events} />}
         </div>
       </aside>
@@ -113,12 +115,13 @@ function Recalled({ run }: { run: AgentRun | null }) {
         <h3 className="text-xs font-semibold tracking-wide text-ink-2 uppercase">Recall calls · run {run.run_id}</h3>
         {mem.recalls.map((r) => (
           <div key={r.event_id} className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="font-medium text-ink">{r.label || "recall"}</span>
             <Badge tone={statusTone(r.source)}>{r.source === "hindsight" ? "Hindsight" : "local fallback"}</Badge>
-            <Badge tone={statusTone(r.status)}>{r.status}</Badge>
+            <Badge tone={statusTone(r.status)}>{r.status === "cached" ? "prefetched cache" : r.status}</Badge>
             <span className="tabular text-ink-2">
               {r.hits.length} hits · {r.latency_ms} ms
+              {r.cache_age_s !== null && r.cache_age_s !== undefined ? ` · fetched ${Math.round(r.cache_age_s)}s earlier` : ""}
             </span>
-            {r.hits[0]?.via && <span className="text-ink-3">· {r.hits[0].via}</span>}
             {r.error && <span className="w-full text-warn-ink">{r.error}</span>}
           </div>
         ))}
@@ -174,9 +177,52 @@ function HitCard({ hit, index }: { hit: MemoryHit; index: number }) {
 }
 
 // ---------------------------------------------------------------- retain
-function RetainLog({ events }: { events: MemoryEvent[] }) {
-  if (events.length === 0) return <Empty text="Nothing retained yet this session. Each Copilot diagnosis and each confirmed outcome is retained." />;
+function OutboxBar({ onSynced }: { onSynced: () => void }) {
+  const [status, setStatus] = useState<OutboxStatus | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  useEffect(() => {
+    api.outbox().then(setStatus).catch(() => setStatus(null));
+  }, []);
+  if (!status) return null;
   return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs">
+      <Icon name="refresh" className="size-3.5 text-ink-2" />
+      <span className="text-ink-2">
+        Outbox: <strong className="font-medium text-ink">{status.pending}</strong> record{status.pending === 1 ? "" : "s"} waiting for
+        Hindsight{status.pending ? "" : " (everything is synced)"}
+      </span>
+      {status.pending > 0 && status.enabled && (
+        <button
+          disabled={syncing}
+          onClick={async () => {
+            setSyncing(true);
+            try {
+              setStatus(await api.syncOutbox());
+              onSynced();
+            } finally {
+              setSyncing(false);
+            }
+          }}
+          className="ml-auto rounded-md border border-line bg-surface px-2 py-1 font-medium hover:bg-surface-3 disabled:opacity-50"
+        >
+          {syncing ? "Syncing…" : "Sync now"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RetainLog({ events, onSynced }: { events: MemoryEvent[]; onSynced: () => void }) {
+  if (events.length === 0)
+    return (
+      <>
+        <OutboxBar onSynced={onSynced} />
+        <Empty text="Nothing retained yet this session. Each Copilot diagnosis and each confirmed outcome is retained." />
+      </>
+    );
+  return (
+    <>
+    <OutboxBar onSynced={onSynced} />
     <ol className="space-y-2">
       {events.map((e) => {
         const items = (e.request.items as { content?: string; tags?: string[] }[] | undefined) ?? [];
@@ -197,6 +243,46 @@ function RetainLog({ events }: { events: MemoryEvent[] }) {
         );
       })}
     </ol>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------- guardrails
+function Guardrails() {
+  const [data, setData] = useState<{ source: string; items: Directive[]; error?: string } | null>(null);
+  useEffect(() => {
+    api.directives().then(setData).catch(() => setData({ source: "error", items: [] }));
+  }, []);
+  if (!data) return <Spinner label="Loading directives…" />;
+  const sorted = [...data.items].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-ink-2">
+        Directives are standing rules Hindsight applies to every reflection on this bank. Global rules enforce safety and
+        evidence; approved field bulletins add rules scoped to one model and error code.
+      </p>
+      {data.source !== "hindsight" && (
+        <p className="text-xs text-warn-ink">Showing the configured defaults; Hindsight was not reachable{data.error ? ` (${data.error})` : ""}.</p>
+      )}
+      <ol className="space-y-2">
+        {sorted.map((d) => (
+          <li key={d.name} className="rounded-lg border border-line p-3">
+            <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs">
+              <Icon name="shield" className="size-3.5 text-accent-ink" />
+              <code className="font-mono text-[11px] font-semibold">{d.name}</code>
+              <Badge>priority {d.priority ?? 0}</Badge>
+              {d.tags && d.tags.length > 0 ? (
+                <Badge tone="accent">scoped: {d.tags.join(" + ")}</Badge>
+              ) : (
+                <Badge>global</Badge>
+              )}
+              {d.is_active === false && <Badge tone="warn">inactive</Badge>}
+            </div>
+            <p className="text-sm text-ink">{d.content}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
@@ -282,6 +368,9 @@ function ReflectionPanel({ run, catalog }: { run: AgentRun | null; catalog: Cata
             {shown.trigger && <span className="text-ink-3">· trigger: {shown.trigger}</span>}
           </div>
           {shown.error && <p className="text-xs text-warn-ink">{shown.error}</p>}
+          {shown.directives && shown.directives.length > 0 && (
+            <p className="text-xs text-ink-2">Directives applied: {shown.directives.join(", ")}</p>
+          )}
           <Markdown>{shown.text}</Markdown>
           {shown.based_on.length > 0 && <JsonBlock label={`Based on ${shown.based_on.length} memories`} value={shown.based_on} />}
         </section>

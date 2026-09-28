@@ -1,0 +1,82 @@
+[
+  {
+    "id": "e412-chl0417",
+    "technician": "Tech_Alex",
+    "unit": "CHL-0417",
+    "query": "Carrier AquaForce 30XA unit CHL-0417 is tripping E-412 again. The manual says replace the inverter board. Should I?",
+    "kind": "field",
+    "root_cause_any": ["j4", "harness"],
+    "first_fix_any": ["j4", "harness"],
+    "first_fix_not": ["replace inverter", "drive board", "vfd-412b"]
+  },
+  {
+    "id": "gf17-inv3140-desert",
+    "technician": "Tech_Alex",
+    "unit": "INV-3140",
+    "query": "Apex INV-9000 at Mesa Ridge (INV-3140) keeps throwing GF-17 around midday. GFDI reset didn't stick. What next?",
+    "kind": "field",
+    "root_cause_any": ["mc4", "connector"],
+    "first_fix_any": ["mc4", "string 7", "connector", "string"],
+    "first_fix_not": ["grounding strap", "firmware", "dc input board", "reset gfdi"]
+  },
+  {
+    "id": "gf17-inv2267-coastal",
+    "technician": "Tech_Dave",
+    "unit": "INV-2267",
+    "query": "Harbor Point INV-2267 is tripping GF-17 ground fault every morning after the sea fog rolls in. Firmware is current.",
+    "kind": "field",
+    "root_cause_any": ["strap", "grounding", "bond"],
+    "first_fix_any": ["strap", "bond"],
+    "first_fix_not": ["firmware", "dc input board", "reset gfdi"]
+  },
+  {
+    "id": "f082-elv0215",
+    "technician": "Tech_Dave",
+    "unit": "ELV-0215",
+    "query": "KONE MX20 car ELV-0215 is jerking on relevel, F-082 logged 14 times today. Do I swap the encoder?",
+    "kind": "field",
+    "root_cause_any": ["shield", "emi"],
+    "first_fix_any": ["shield", "emi clamp", "360"],
+    "first_fix_not": ["replace motor encoder", "replace the encoder", "km-enc-2048"]
+  },
+  {
+    "id": "e221-chl0522",
+    "technician": "Tech_Sarah",
+    "unit": "CHL-0522",
+    "query": "30XA CHL-0522 showing E-221, controller LWT is 1.9 °C above the BMS probe. Replace the thermistor?",
+    "kind": "field",
+    "root_cause_any": ["thermowell", "thermal compound", "air gap"],
+    "first_fix_any": ["re-seat", "reseat", "thermal compound", "thermowell"],
+    "first_fix_not": ["replace the thermistor", "replace leaving-water thermistor", "thm-10k"]
+  },
+  {
+    "id": "ot05-inv2231",
+    "technician": "Tech_Alex",
+    "unit": "INV-2231",
+    "query": "Apex INV-9000 INV-2231 is derating with OT-05 heatsink over-temperature, but the fans sound normal. Replace the fan assembly?",
+    "kind": "field",
+    "root_cause_any": ["ntc", "sensor", "calibrat"],
+    "first_fix_any": ["ntc", "calibrat", "ir thermometer"],
+    "first_fix_not": ["replace cooling fan", "replace the fan", "fan assembly inv9-fan-120"]
+  },
+  {
+    "id": "f119-elv0109-control",
+    "technician": "Tech_Sarah",
+    "unit": "ELV-0109",
+    "query": "KONE MX20 ELV-0109 raised F-119 brake release monitoring fault this morning. What should I check?",
+    "kind": "manual",
+    "root_cause_any": ["air gap", "microswitch"],
+    "first_fix_any": ["air gap", "0.40", "0.35"],
+    "first_fix_not": []
+  },
+  {
+    "id": "com31-inv3107-control",
+    "technician": "Tech_Dave",
+    "unit": "INV-3107",
+    "query": "INV-3107 at Mesa Ridge lost SCADA comms, COM-31 Modbus RS-485 communication loss. Where do I start?",
+    "kind": "manual",
+    "root_cause_any": ["termination", "120", "comms card", "rs-485"],
+    "first_fix_any": ["termination", "120", "reseat", "comms card"],
+    "first_fix_not": []
+  }
+]

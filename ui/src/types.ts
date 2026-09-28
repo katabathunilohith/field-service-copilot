@@ -50,12 +50,30 @@ export interface Health {
     hindsight_timeout_s: number;
     groq_configured: boolean;
     groq_model: string;
+    groq_baseline_model: string;
+    voice_enabled: boolean;
+    access_token_required: boolean;
     environment: string;
+    setup_hints: string[];
   };
-  hindsight: { reachable: boolean; reason?: string; latency_ms?: number };
-  llm: { available: boolean; model: string };
+  hindsight: {
+    reachable: boolean;
+    reason?: string;
+    latency_ms?: number;
+    stats?: { total_nodes: number; total_documents: number; total_observations: number; pending_operations: number };
+  };
+  llm: { available: boolean; model: string; baseline_model: string; rate: Record<string, { limit_tpm: number; available_tokens: number }> };
+  outbox: OutboxStatus;
   fallback_store_records: number;
   banks: string[];
+}
+
+export interface OutboxStatus {
+  pending: number;
+  enabled: boolean;
+  oldest: string | null;
+  pushed?: number;
+  failed?: number;
 }
 
 export interface MemoryHit {
@@ -85,6 +103,8 @@ export interface RecallOutcome {
   latency_ms: number;
   event_id: number;
   error: string | null;
+  label: string;
+  cache_age_s: number | null;
   hits: MemoryHit[];
 }
 
@@ -132,6 +152,7 @@ export interface Reflection {
   event_id: number;
   cached: boolean;
   error: string | null;
+  directives?: string[];
   trigger?: string;
 }
 
@@ -165,7 +186,25 @@ export interface ToolTrace {
   repair_notes: string[];
   latency_ms: number;
   error: string | null;
-  result: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  prefetched?: boolean;
+  stage?: "prefetch" | "diagnosis" | "work order";
+}
+
+export interface Citation {
+  text: string;
+  technician: string;
+  date: string;
+  unit: string | null;
+  status: "verified" | "unit_mismatch" | "not_found";
+  ledger_units: string[];
+}
+
+export interface CitationReport {
+  total: number;
+  verified: number;
+  issues: Citation[];
+  citations: Citation[];
 }
 
 export interface Ticket {
@@ -212,8 +251,16 @@ export interface AgentRun {
   answer: string;
   memory: MemoryView | null;
   tool_calls: ToolTrace[];
+  citations: CitationReport | null;
   ticket: Ticket | null;
-  llm: { model: string; rounds: number; usage: Record<string, number>; recoveries: { round: number; kind: string }[]; error?: string };
+  llm: {
+    model: string;
+    rounds: number;
+    usage: Record<string, number>;
+    recoveries: { round: number; kind: string }[];
+    waits: { seconds: number; reason: string }[];
+    error?: string;
+  };
   timings: Record<string, number>;
   warnings: string[];
   created_at: string;
@@ -294,4 +341,136 @@ export interface FleetMetrics {
   technicians: { technician: string; role: string; jobs: number; ftf_weeks_1_2: number; ftf_weeks_3_4: number }[];
   live: { tickets_open: number; tickets_confirmed: number; tickets_held: number };
   definition: string;
+}
+
+// ---------------------------------------------------------------- streaming
+export type StreamEvent =
+  | { event: "parsed"; data: { run_id: string; parsed: AgentRun["parsed"]; technician: Technician } }
+  | { event: "tool"; data: Partial<ToolTrace> & { phase: "start" | "done"; name: string } }
+  | { event: "recall"; data: { status: "start" | "done"; source?: string; count?: number; latency_ms?: number; recalls?: { label: string; source: string; status: string; latency_ms: number; hits: number }[]; delta?: MemoryDelta | null } }
+  | { event: "reflect"; data: { status: string; source: string; cached: boolean; trigger: string } }
+  | { event: "llm"; data: { round: number; status: string; model: string } }
+  | { event: "llm_wait"; data: { seconds: number; reason: string } }
+  | { event: "answer"; data: { text: string; citations: CitationReport | null } }
+  | { event: "ticket"; data: { ticket: Ticket } }
+  | { event: "retain"; data: { status: string; source: string; operation_id: string | null; error: string | null } }
+  | { event: "done"; data: { run: AgentRun } }
+  | { event: "error"; data: { message: string } };
+
+export interface Transcription {
+  text: string;
+  duration_s: number | null;
+  model: string;
+  latency_ms: number;
+  parsed: AgentRun["parsed"];
+}
+
+// ---------------------------------------------------------------- bulletins
+export interface BulletinEvidence {
+  records: number;
+  period: [string, string] | null;
+  oem_step: { action: string | null; attempts: number; held: number };
+  field_fixes: {
+    action: string;
+    root_cause: string;
+    attempts: number;
+    held: number;
+    first_confirmed_by: string | null;
+    first_confirmed_on: string | null;
+    first_unit: string | null;
+    technicians: string[];
+    sites: Record<string, number>;
+  }[];
+  ruled_out: OutcomeEntry[];
+}
+
+export interface Bulletin {
+  id: string;
+  status: "draft" | "approved";
+  created_at: string;
+  model_key: string;
+  model_name: string;
+  error_code: string;
+  error_title: string;
+  content: {
+    title: string;
+    symptom: string;
+    root_cause: string;
+    recommended_procedure: string[];
+    when_to_use_oem_procedure: string;
+    site_conditions?: string;
+    confidence: "low" | "medium" | "high";
+  };
+  evidence: BulletinEvidence;
+  generator: "hindsight_reflect" | "template";
+  generator_error: string | null;
+  directives_applied: string[];
+  memories_consulted: number;
+  approved_by?: string;
+  approved_at?: string;
+  publish?: { memory: string; directive: string };
+}
+
+export interface BulletinCandidate {
+  model_key: string;
+  model_name: string;
+  error_code: string;
+  error_title: string;
+  evidence: BulletinEvidence;
+  bulletin: { id: string; status: string } | null;
+}
+
+export interface Directive {
+  id?: string;
+  name: string;
+  content: string;
+  priority?: number;
+  is_active?: boolean;
+  tags?: string[] | null;
+}
+
+// ---------------------------------------------------------------- eval
+export interface Rate {
+  hits: number;
+  total: number;
+  rate: number | null;
+}
+
+export interface EvalRow {
+  id: string;
+  kind: "field" | "manual";
+  unit: string;
+  error_code: string;
+  model_name: string;
+  baseline: { root_cause_ok: boolean; first_fix_ok: boolean; safety_ok: boolean; first_fix: string; latency_ms: number };
+  copilot: {
+    root_cause_ok: boolean;
+    first_fix_ok: boolean;
+    safety_ok: boolean;
+    first_fix: string;
+    latency_ms: number;
+    citations_total: number;
+    citations_verified: number;
+    citations_ok: boolean;
+  };
+  avoided_parts_usd: number;
+  avoided_labor_h: number;
+}
+
+export interface EvalReport {
+  available: boolean;
+  generated_at?: string;
+  model?: string;
+  baseline_model?: string;
+  memory?: string;
+  summary?: {
+    scenarios: number;
+    baseline: Record<"root_cause_ok" | "first_fix_ok" | "safety_ok", Rate>;
+    copilot: Record<"root_cause_ok" | "first_fix_ok" | "safety_ok" | "citations_ok", Rate>;
+    tricky_first_fix: { baseline: Rate; copilot: Rate };
+    control_first_fix: { baseline: Rate; copilot: Rate };
+    avoided_parts_usd: number;
+    avoided_labor_h: number;
+  };
+  rows?: EvalRow[];
 }

@@ -25,6 +25,18 @@ RecordType = Literal["repair", "diagnosis", "outcome"]
 
 # --------------------------------------------------------------------------- banks
 @dataclass(frozen=True)
+class Directive:
+    """A standing rule Hindsight injects into every reflect on the bank."""
+
+    name: str
+    content: str
+    priority: int
+
+    def payload(self) -> dict[str, Any]:
+        return {"name": self.name, "content": self.content, "priority": self.priority, "is_active": True}
+
+
+@dataclass(frozen=True)
 class BankSchema:
     bank_id: str
     name: str
@@ -32,16 +44,20 @@ class BankSchema:
     background: str
     retain_mission: str
     reflect_mission: str
+    observations_mission: str
+    directives: tuple[Directive, ...] = ()
 
-    def profile_payload(self) -> dict[str, Any]:
-        """Body for PUT /v1/default/banks/{bank_id} (create or update)."""
+    def create_payload(self) -> dict[str, Any]:
+        """Body for PUT /v1/default/banks/{bank_id} (create, or no-op update)."""
+        return {"background": self.background}
+
+    def config_updates(self) -> dict[str, Any]:
+        """Body['updates'] for PATCH /v1/default/banks/{bank_id}/config."""
         return {
-            "name": self.name,
-            "mission": self.mission,
-            "background": self.background,
-            "retain_mission": self.retain_mission,
             "reflect_mission": self.reflect_mission,
+            "retain_mission": self.retain_mission,
             "enable_observations": True,
+            "observations_mission": self.observations_mission,
         }
 
 
@@ -68,15 +84,51 @@ _REFLECT_MISSION = (
 )
 
 
+_OBSERVATIONS_MISSION = (
+    "Consolidate repeated repair outcomes into durable patterns per equipment model and error code: which OEM "
+    "manual steps keep failing, which field-discovered fixes hold and how often, who first found them, and any "
+    "site or environmental variants (e.g. coastal vs desert). Keep hold counts, dates and technician names."
+)
+
+# Safety and evidence rules applied to every reflect on the bank (Hindsight directives).
+DIRECTIVES: tuple[Directive, ...] = (
+    Directive(
+        "safety-first",
+        "Always lead with the applicable lockout/tagout or hoistway-entry safety step. Never recommend bypassing "
+        "interlocks, safety circuits, ground-fault protection or other protective devices, even temporarily.",
+        100,
+    ),
+    Directive(
+        "cite-field-evidence",
+        "When guidance relies on field memory, cite the technician, date and unit, and state how many times the "
+        "fix held versus did not hold.",
+        90,
+    ),
+    Directive(
+        "manual-as-fallback",
+        "Recommend a field-verified fix ahead of the OEM procedure only when memory shows it held more often, and "
+        "always keep the OEM procedure as the documented fallback.",
+        80,
+    ),
+    Directive(
+        "no-invented-data",
+        "Never invent part numbers, torque values, measurements or hold rates that are not present in memory.",
+        70,
+    ),
+)
+
+
 def bank_schema(bank_id: str, fleet: str | None = None) -> BankSchema:
     scope = f" ({fleet})" if fleet else ""
     return BankSchema(
         bank_id=bank_id,
         name=f"Field Service Copilot{scope}",
         mission=_MISSION,
-        background=_BACKGROUND,
+        background=f"{_MISSION} {_BACKGROUND}",
         retain_mission=_RETAIN_MISSION,
         reflect_mission=_REFLECT_MISSION,
+        observations_mission=_OBSERVATIONS_MISSION,
+        directives=DIRECTIVES,
     )
 
 

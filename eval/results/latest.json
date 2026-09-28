@@ -1,0 +1,324 @@
+{
+  "generated_at": "2026-09-28T06:29:52Z",
+  "model": "openai/gpt-oss-120b",
+  "baseline_model": "openai/gpt-oss-120b",
+  "memory": "hindsight",
+  "summary": {
+    "scenarios": 8,
+    "baseline": {
+      "root_cause_ok": {
+        "hits": 3,
+        "total": 8,
+        "rate": 0.375
+      },
+      "first_fix_ok": {
+        "hits": 1,
+        "total": 8,
+        "rate": 0.125
+      },
+      "safety_ok": {
+        "hits": 8,
+        "total": 8,
+        "rate": 1.0
+      }
+    },
+    "copilot": {
+      "root_cause_ok": {
+        "hits": 8,
+        "total": 8,
+        "rate": 1.0
+      },
+      "first_fix_ok": {
+        "hits": 8,
+        "total": 8,
+        "rate": 1.0
+      },
+      "safety_ok": {
+        "hits": 8,
+        "total": 8,
+        "rate": 1.0
+      },
+      "citations_ok": {
+        "hits": 7,
+        "total": 8,
+        "rate": 0.875
+      }
+    },
+    "tricky_first_fix": {
+      "baseline": {
+        "hits": 0,
+        "total": 6,
+        "rate": 0.0
+      },
+      "copilot": {
+        "hits": 6,
+        "total": 6,
+        "rate": 1.0
+      }
+    },
+    "control_first_fix": {
+      "baseline": {
+        "hits": 1,
+        "total": 2,
+        "rate": 0.5
+      },
+      "copilot": {
+        "hits": 2,
+        "total": 2,
+        "rate": 1.0
+      }
+    },
+    "avoided_parts_usd": 7455,
+    "avoided_labor_h": 21.0
+  },
+  "rows": [
+    {
+      "id": "e412-chl0417",
+      "kind": "field",
+      "unit": "CHL-0417",
+      "error_code": "E-412",
+      "model_name": "Carrier AquaForce 30XA",
+      "baseline": {
+        "root_cause_ok": false,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Supply check** - measure line-to-line voltage on all three phases; confirm imbalance \u2264\u202f2\u202f%.",
+        "latency_ms": 2640,
+        "tokens": 1852,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "Visually inspect the J4 power harness for looseness or chafing.",
+        "latency_ms": 4320,
+        "tokens": 3521,
+        "llm_error": null,
+        "citations_total": 3,
+        "citations_verified": 3,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 4850,
+      "avoided_labor_h": 6.0
+    },
+    {
+      "id": "gf17-inv3140-desert",
+      "kind": "field",
+      "unit": "INV-3140",
+      "error_code": "GF-17",
+      "model_name": "Apex Solar Inverter INV-9000",
+      "baseline": {
+        "root_cause_ok": false,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Inspect & remediate the offending string** (identified as string\u202f7):",
+        "latency_ms": 2447,
+        "tokens": 1606,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Document** - Record current telemetry values (Riso, leakage, string-by-string currents).",
+        "latency_ms": 8938,
+        "tokens": 3052,
+        "llm_error": null,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 0,
+      "avoided_labor_h": 2.5
+    },
+    {
+      "id": "gf17-inv2267-coastal",
+      "kind": "field",
+      "unit": "INV-2267",
+      "error_code": "GF-17",
+      "model_name": "Apex Solar Inverter INV-9000",
+      "baseline": {
+        "root_cause_ok": false,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Dry & protect** - If moisture is present, gently dry with lint-free cloth, then apply a conformal-coating spray approved for photovoltaic equipment. Ensure all cable entries have proper gaskets and drip loops.",
+        "latency_ms": 24161,
+        "tokens": 2901,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Clean & replace grounding strap**",
+        "latency_ms": 23144,
+        "tokens": 3045,
+        "llm_error": null,
+        "citations_total": 1,
+        "citations_verified": 1,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 0,
+      "avoided_labor_h": 2.5
+    },
+    {
+      "id": "f082-elv0215",
+      "kind": "field",
+      "unit": "ELV-0215",
+      "error_code": "F-082",
+      "model_name": "KONE EcoDisc Hoist MX20",
+      "baseline": {
+        "root_cause_ok": false,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Visual inspection** - Confirm encoder mounting bolts are torqued to spec and the coupling shows no play.",
+        "latency_ms": 6357,
+        "tokens": 1358,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Inspect encoder cable** - confirm the shield is continuous and bonded at both ends.",
+        "latency_ms": 19985,
+        "tokens": 2811,
+        "llm_error": null,
+        "citations_total": 4,
+        "citations_verified": 2,
+        "citations_ok": false,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 1900,
+      "avoided_labor_h": 6.0
+    },
+    {
+      "id": "e221-chl0522",
+      "kind": "field",
+      "unit": "CHL-0522",
+      "error_code": "E-221",
+      "model_name": "Carrier AquaForce 30XA",
+      "baseline": {
+        "root_cause_ok": false,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Verify sensor deviation**",
+        "latency_ms": 7661,
+        "tokens": 1521,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Clean the thermowell interior** - scrape any old compound, wipe with isopropyl alcohol, and inspect for corrosion.",
+        "latency_ms": 24084,
+        "tokens": 3205,
+        "llm_error": null,
+        "citations_total": 3,
+        "citations_verified": 3,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 85,
+      "avoided_labor_h": 1.5
+    },
+    {
+      "id": "ot05-inv2231",
+      "kind": "field",
+      "unit": "INV-2231",
+      "error_code": "OT-05",
+      "model_name": "Apex Solar Inverter INV-9000",
+      "baseline": {
+        "root_cause_ok": true,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Run the built-in fan diagnostic** (Service \u2192 Diagnostics \u2192 Fan Test). Record the measured RPM and compare it to the rated 4000\u202frpm.",
+        "latency_ms": 5687,
+        "tokens": 1373,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Run NTC calibration** - In the inverter diagnostics, select **NTC Cal**. Measure the heatsink surface temperature with an IR thermometer, compare to the inverter\u2019s NTC reading, and adjust the calibration offset as inst",
+        "latency_ms": 23758,
+        "tokens": 2757,
+        "llm_error": null,
+        "citations_total": 1,
+        "citations_verified": 1,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 620,
+      "avoided_labor_h": 2.5
+    },
+    {
+      "id": "f119-elv0109-control",
+      "kind": "manual",
+      "unit": "ELV-0109",
+      "error_code": "F-119",
+      "model_name": "KONE EcoDisc Hoist MX20",
+      "baseline": {
+        "root_cause_ok": true,
+        "first_fix_ok": false,
+        "safety_ok": true,
+        "first_fix": "**Access the brake assembly** - Remove the protective cover on the brake chamber per \u00a73.2 of the MX20 manual.",
+        "latency_ms": 9721,
+        "tokens": 1376,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Quick field check - air gap**",
+        "latency_ms": 16139,
+        "tokens": 2907,
+        "llm_error": null,
+        "citations_total": 2,
+        "citations_verified": 2,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 0,
+      "avoided_labor_h": 0.0
+    },
+    {
+      "id": "com31-inv3107-control",
+      "kind": "manual",
+      "unit": "INV-3107",
+      "error_code": "COM-31",
+      "model_name": "Apex Solar Inverter INV-9000",
+      "baseline": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Inspect termination** - Locate the RS-485 bus termination at the farthest node (often the SCADA gateway or last inverter in the chain). Confirm a 120\u202f\u03a9 resistor is present and correctly installed. Replace if missing or",
+        "latency_ms": 5138,
+        "tokens": 1310,
+        "llm_error": null
+      },
+      "copilot": {
+        "root_cause_ok": true,
+        "first_fix_ok": true,
+        "safety_ok": true,
+        "first_fix": "**Verify termination** - With the inverter powered down, measure the resistance across the RS-485 A-B pair at the far-end connector. It should read ~120\u202f\u03a9. If open or \u2260120\u202f\u03a9, install a 120\u202f\u03a9 termination resistor (generic",
+        "latency_ms": 14093,
+        "tokens": 2499,
+        "llm_error": null,
+        "citations_total": 3,
+        "citations_verified": 3,
+        "citations_ok": true,
+        "memory_source": "hindsight"
+      },
+      "avoided_parts_usd": 0,
+      "avoided_labor_h": 0.0
+    }
+  ]
+}
