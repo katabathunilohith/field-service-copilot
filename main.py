@@ -14,6 +14,7 @@ import logging
 import os
 import secrets
 import time
+from pathlib import Path
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from agent.orchestrator import DiagnoseRequest, DiagnosticOrchestrator
 from config import ROOT_DIR, RUNTIME_DIR, Settings, settings as default_settings
 from fleet.bulletins import BulletinService, to_markdown
 from fleet.catalog import get_catalog
+from fleet.demo import DemoReset, DemoResetError
 from fleet.metrics import fleet_metrics
 from fleet.tickets import TicketLedger
 from memory.bank_schemas import all_bank_ids, bank_schema, load_seed, records_from_seed
@@ -96,6 +98,14 @@ class BulletinApproveBody(BaseModel):
     approver: str = Field(default="Service Manager", min_length=2, max_length=60)
 
 
+class CheckpointBody(BaseModel):
+    label: str = Field(default="", max_length=80)
+
+
+class ResetBody(BaseModel):
+    confirm: Literal[True]  # a reset deletes memory; the client must say so explicitly
+
+
 class NoteBody(BaseModel):
     text: str = Field(min_length=8, max_length=500)
     technician_id: str = Field(pattern=r"^Tech_[A-Za-z]{2,20}$")
@@ -120,6 +130,9 @@ class Services:
     directives_cache: tuple[float, dict[str, Any]] | None = None
     runs: set[asyncio.Task] = field(default_factory=set)
     notes: FieldNotes | None = None
+    demo: DemoReset | None = None
+    runtime_dir: Path | None = None
+    transport: Any = None
 
 
 def build_services(
@@ -137,7 +150,9 @@ def build_services(
     notes = FieldNotes(memory, catalog)
     orchestrator = DiagnosticOrchestrator(llm=llm, memory=memory, catalog=catalog, tickets=tickets, notes=notes)
     bulletins = BulletinService(runtime_dir / "bulletins.jsonl", catalog, memory)
-    return Services(cfg, events, fallback, memory, llm, tickets, orchestrator, bulletins, seed, notes=notes)
+    return Services(cfg, events, fallback, memory, llm, tickets, orchestrator, bulletins, seed, notes=notes,
+                    demo=DemoReset(Path(runtime_dir), catalog, memory), runtime_dir=Path(runtime_dir),
+                    transport=hindsight_transport)
 
 
 class RateLimiter:
@@ -175,6 +190,23 @@ def _whisper_prompt() -> str:
 def create_app(cfg: Settings = default_settings, *, services: Services | None = None) -> FastAPI:
     limiter = RateLimiter(cfg.rate_limit_per_min)
 
+    def start(svc: Services) -> None:
+        """Bank setup and background loops (keep-warm, outbox sync, reflection prewarm)."""
+        if svc.memory.enabled:
+            async def ensure_banks() -> None:
+                for bank_id in all_bank_ids():
+                    try:
+                        await svc.memory.ensure_bank(bank_schema(bank_id))
+                    except (TimeoutError, HindsightError) as exc:
+                        log.warning("could not verify bank %s: %s", bank_id, exc)
+            svc.runs.add(asyncio.create_task(ensure_banks()))
+            svc.memory.start_background(bank_ids=all_bank_ids(), prewarm=svc.orchestrator.reflection_candidates())
+
+    async def stop(svc: Services) -> None:
+        for task in list(svc.runs):
+            task.cancel()
+        await svc.memory.aclose()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.services = services or build_services(cfg)
@@ -186,19 +218,9 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
         )
         for hint in cfg.setup_hints():
             log.warning("setup: %s", hint)
-        if svc.memory.enabled:
-            async def ensure_banks() -> None:
-                for bank_id in all_bank_ids():
-                    try:
-                        await svc.memory.ensure_bank(bank_schema(bank_id))
-                    except (TimeoutError, HindsightError) as exc:
-                        log.warning("could not verify bank %s: %s", bank_id, exc)
-            svc.runs.add(asyncio.create_task(ensure_banks()))
-            svc.memory.start_background(bank_ids=all_bank_ids(), prewarm=svc.orchestrator.reflection_candidates())
+        start(svc)
         yield
-        for task in list(svc.runs):
-            task.cancel()
-        await svc.memory.aclose()
+        await stop(app.state.services)
 
     app = FastAPI(title="Field Service Copilot", version="1.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -386,6 +408,40 @@ def create_app(cfg: Settings = default_settings, *, services: Services | None = 
         except (TimeoutError, HindsightError) as exc:
             return {"source": "local", "error": str(exc)[:200], "items": defaults}
         s.directives_cache = (time.time() + 60, result)
+        return result
+
+    # ---------------------------------------------------------------- demo
+    def demo_tools(request: Request) -> Services:
+        if not cfg.demo_tools:
+            raise HTTPException(404, "Demo tools are disabled (set DEMO_TOOLS=true to enable)")
+        return svc(request)
+
+    @app.get("/api/demo")
+    async def demo_status(request: Request) -> dict[str, Any]:
+        s = demo_tools(request)
+        try:
+            return {"checkpoint": s.demo.checkpoint_info(), "preview": s.demo.preview()}
+        except DemoResetError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    @app.post("/api/demo/checkpoint")
+    async def demo_checkpoint(body: CheckpointBody, request: Request) -> dict[str, Any]:
+        return demo_tools(request).demo.save_checkpoint(body.label)
+
+    @app.post("/api/demo/reset")
+    async def demo_reset(body: ResetBody, request: Request) -> dict[str, Any]:
+        """Delete what this app retained since the checkpoint, then restart the services on the restored state."""
+        s = demo_tools(request)
+        try:
+            result = await s.demo.reset()
+        except DemoResetError as exc:
+            raise HTTPException(409, str(exc)) from None
+        fresh = build_services(cfg, llm=s.llm, runtime_dir=s.runtime_dir, hindsight_transport=s.transport)
+        await stop(s)
+        request.app.state.services = fresh
+        start(fresh)
+        log.info("demo reset: %d documents and %d directives deleted", len(result["deleted_documents"]),
+                 len(result["deleted_directives"]))
         return result
 
     # --------------------------------------------------------- field notes

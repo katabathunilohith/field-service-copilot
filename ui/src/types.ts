@@ -53,6 +53,7 @@ export interface Health {
     groq_baseline_model: string;
     voice_enabled: boolean;
     access_token_required: boolean;
+    demo_tools?: boolean;
     environment: string;
     setup_hints: string[];
   };
@@ -508,4 +509,30 @@ export interface EvalReport {
     avoided_labor_h: number;
   };
   rows?: EvalRow[];
+}
+
+// ---------------------------------------------------------------- demo
+export interface DemoCheckpoint {
+  created_at: string;
+  label: string;
+  records: number;
+  tickets: number;
+  approved_bulletins: number;
+}
+
+export interface DemoStatus {
+  checkpoint: DemoCheckpoint | null;
+  preview: {
+    base: { kind: "seed" } | ({ kind: "checkpoint" } & DemoCheckpoint);
+    counts: { notes: number; sessions: number; outcomes: number; bulletins: number; directives: number; tickets: number };
+    documents: { id: string; type: string; unit_id: string | null; technician: string; at: string }[];
+    bulletins: string[];
+    nothing_to_do: boolean;
+  };
+}
+
+export interface DemoResetResult {
+  restored_to: DemoStatus["preview"]["base"];
+  deleted_documents: string[];
+  deleted_directives: string[];
 }

@@ -160,6 +160,7 @@ All data is synthetic. Model names are used for realism; error codes, part numbe
 | `POST` | `/api/memory/reflect` | `{model, error_code, force}`; on-demand reflection |
 | `GET` | `/api/metrics/fleet` | Weekly first-time-fix, memory density, peer-learning ledger, per-technician stats |
 | `POST` | `/api/notes` | `{text, technician_id, unit_id, scope: unit\|site, kind?: site_rule\|hazard\|machine_quirk}`; screens, then retains a field note |
+| `GET` / `POST` | `/api/demo`, `/api/demo/checkpoint`, `/api/demo/reset` | Rehearsal tools: preview, checkpoint, and reset (`{confirm: true}`); enabled by `DEMO_TOOLS` |
 | `GET` | `/api/briefing?unit_id=` | Pre-visit briefing: field notes for the unit and its site, recalled from Hindsight |
 
 `npm run build` writes `ui/dist`; when that folder exists, `python main.py` also serves the UI at http://localhost:8000.
@@ -180,6 +181,8 @@ test_workflow.py           end-to-end check (offline by default, --live for real
 Runtime state (tickets and the retain journal) is written to `data/runtime/`, which is git-ignored. Delete it to reset live sessions.
 
 ## Demo: tribal knowledge in 60 seconds
+
+Before rehearsing, open **Demo → Save checkpoint** in the header. After each rehearsal, **Demo → Reset demo** deletes from Hindsight exactly what this app retained since the checkpoint (notes, sessions, outcomes, approved bulletins and their directives) and restores the local records, so every run starts from the same memory. Without a checkpoint, a reset returns to the seeded data. Seeded history and the base safety directives are never touched, and a reset only removes records this app instance created, so a teammate sharing the bank is unaffected. The tools are on in development and off otherwise unless `DEMO_TOOLS=true`.
 
 1. As **Tech_Alex**, select **CHL-0417**. The "Before you go" strip is empty: nobody has noted anything about Riverside Medical.
 2. **+ Add field note** → *Site rule*, *Whole site*: "Tower B roof needs a facilities escort after 6pm." (or tap the mic). Add an *Equipment quirk* for this unit: "VFD cabinet hinge is seized; bring a 10 mm socket."

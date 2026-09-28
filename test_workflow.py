@@ -66,11 +66,13 @@ class MockHindsight:
                                       Path(tempfile.mkdtemp()) / "mock.jsonl")
         self.retained: list[dict[str, Any]] = []
         self.directives: list[dict[str, Any]] = []
+        self.deleted: set[str] = set()  # documents removed through DELETE /documents/{id}
         self.calls: list[str] = []
 
     def _recall(self, body: dict[str, Any]) -> dict[str, Any]:
         strict = body.get("tags_match") in ("all_strict", "any_strict")
-        hits = self.store.search(body["query"], body.get("tags"), limit=60 if strict else 12)
+        hits = [h for h in self.store.search(body["query"], body.get("tags"), limit=60 if strict else 12)
+                if h.document_id not in self.deleted]
         if body.get("tags_match") == "all_strict":
             hits = [h for h in hits if all(t in h.tags for t in body.get("tags", []))]
         if body.get("tags_match") == "any_strict":
@@ -146,6 +148,17 @@ class MockHindsight:
         if path.endswith("/directives") and method == "POST":
             self.directives.append({**body, "id": f"d{len(self.directives) + 1}"})
             return httpx.Response(200, json=self.directives[-1])
+        if "/documents/" in path and method == "DELETE":
+            doc = path.rsplit("/", 1)[1]
+            known = doc in {r.record_id for r in self.store.all_records()} or doc in {i["document_id"] for i in self.retained}
+            if not known or doc in self.deleted:
+                return httpx.Response(404, json={"detail": "document not found"})
+            self.deleted.add(doc)
+            return httpx.Response(200, json={"success": True, "message": "deleted", "document_id": doc, "memory_units_deleted": 3})
+        if "/directives/" in path and method == "DELETE":
+            directive_id = path.rsplit("/", 1)[1]
+            self.directives = [d for d in self.directives if d.get("id") != directive_id]
+            return httpx.Response(200, json={"success": True})
         if "/directives/" in path and method == "PATCH":
             return httpx.Response(200, json=body)
         if path.endswith("/config") or (method == "PUT" and path.count("/") == 4):
@@ -254,7 +267,7 @@ def offline_settings(**overrides: Any) -> Settings:
     pinned: dict[str, Any] = dict(
         hindsight_api_key="test-key", hindsight_base_url="https://hindsight.mock", hindsight_timeout_s=1.5,
         hindsight_retain_timeout_s=15.0, hindsight_reflect_timeout_s=45.0, hindsight_prewarm=True,
-        groq_api_key="test-key", groq_max_retries=2, app_access_token=None, rate_limit_per_min=0,
+        groq_api_key="test-key", groq_max_retries=2, app_access_token=None, rate_limit_per_min=0, demo_tools=True,
     )
     return replace(Settings(), **{**pinned, **overrides})
 
@@ -651,6 +664,67 @@ def test_field_notes_briefing() -> None:
     asyncio.run(run())
 
 
+def test_demo_reset() -> None:
+    print("\n[13] Demo reset: a rehearsal is undone, seeded memory is untouched")
+
+    async def run() -> None:
+        app, _, mock = build_offline_app()
+        async with running(app) as client:
+            cp = (await client.post("/api/demo/checkpoint", json={"label": "clean"})).json()
+            check(cp["label"] == "clean" and cp["records"] == 0, "checkpoint saved before the rehearsal")
+            seeded = {r.record_id for r in mock.store.all_records()}
+
+            # A full rehearsal: a note, a diagnosis with its work order, an outcome, an approved bulletin.
+            note = (await client.post("/api/notes", json={"text": "Tower B roof needs a facilities escort after 6pm.",
+                                                          "technician_id": "Tech_Alex", "unit_id": "CHL-0417", "scope": "site"})).json()
+            run_ = (await client.post("/api/diagnose", json={"query": QUERY_B, "technician_id": "Tech_Alex", "mode": "copilot"})).json()
+            ticket = run_["copilot"]["ticket"]["id"]
+            await client.post(f"/api/tickets/{ticket}/outcome", json={"outcome_held": True})
+            bulletin = (await client.post("/api/bulletins/draft", json={"model": "carrier-30xa", "error_code": "E-412"})).json()
+            await client.post(f"/api/bulletins/{bulletin['id']}/approve", json={"approver": "Service Manager"})
+            await until(lambda: not app.state.services.memory._inflight_docs, "retains to land", 20)
+            check(len((await client.get("/api/briefing", params={"unit_id": "CHL-0417"})).json()["items"]) == 1,
+                  "rehearsal left a note on CHL-0417")
+
+            status = (await client.get("/api/demo")).json()
+            c = status["preview"]["counts"]
+            check((c["notes"], c["sessions"], c["outcomes"], c["bulletins"], c["tickets"]) == (1, 1, 1, 1, 1),
+                  f"preview lists exactly the rehearsal: {c}")
+            refused = await client.post("/api/demo/reset", json={})
+            check(refused.status_code == 422, "a reset without explicit confirmation is refused")
+
+            result = (await client.post("/api/demo/reset", json={"confirm": True})).json()
+            gone = set(result["deleted_documents"])
+            check({note["note"]["id"], f"{ticket.lower()}-diagnosis", f"{ticket.lower()}-outcome", bulletin["id"].lower()} <= gone,
+                  f"deleted from Hindsight: {len(gone)} documents")
+            check(result["deleted_directives"] == [f"bulletin-{bulletin['id'].lower()}"]
+                  and not any(d["name"].startswith("bulletin-") for d in mock.directives),
+                  "the bulletin's scoped directive is removed; base directives stay")
+            check(not (gone & seeded) and seeded <= {r.record_id for r in mock.store.all_records()},
+                  "no seeded document was touched")
+
+            check((await client.get("/api/briefing", params={"unit_id": "CHL-0417"})).json()["items"] == [],
+                  "CHL-0417 is back to an empty briefing")
+            check((await client.get("/api/tickets")).json() == [], "local tickets restored to the checkpoint")
+            b = (await client.get("/api/bulletins")).json()
+            check(b["bulletins"] == [] and all(c["bulletin"] is None for c in b["candidates"]),
+                  "bulletins restored: E-412 can be drafted and approved again")
+            check((await client.get("/api/memory/outbox")).json()["pending"] == 0, "nothing left waiting in the outbox")
+            again = (await client.get("/api/demo")).json()["preview"]
+            check(again["nothing_to_do"], "a second reset has nothing to do")
+
+    async def disabled() -> None:
+        cfg = offline_settings(demo_tools=False)
+        services = build_services(cfg, llm=ScriptedGroq(cfg), runtime_dir=Path(tempfile.mkdtemp()),
+                                  hindsight_transport=httpx.MockTransport(MockHindsight(cfg.hindsight_api_key).handler))
+        async with running(create_app(cfg, services=services)) as client:
+            check((await client.post("/api/demo/reset", json={"confirm": True})).status_code == 404,
+                  "demo tools are off unless enabled (off by default outside development)")
+
+    asyncio.run(run())
+    asyncio.run(disabled())
+
+
 def test_bulletin_publish() -> None:
     print("\n[9] Service bulletin: drafted by structured reflect, approved into memory and a scoped directive")
 
@@ -766,7 +840,7 @@ def main() -> None:
     tests = [
         test_json_repair, test_citations, test_token_bucket, test_recall_timeout_falls_back, test_slow_retain_lands,
         test_retain_outage, test_end_to_end_learning_loop, test_stream_reports_retain, test_bulletin_publish,
-        test_metrics_learning_curve, test_fully_degraded, test_field_notes_briefing,
+        test_metrics_learning_curve, test_fully_degraded, test_field_notes_briefing, test_demo_reset,
     ]
     failed = 0
     for test in tests:

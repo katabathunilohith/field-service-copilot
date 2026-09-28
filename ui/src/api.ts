@@ -4,6 +4,9 @@ import type {
   Bulletin,
   BulletinCandidate,
   Catalog,
+  DemoCheckpoint,
+  DemoResetResult,
+  DemoStatus,
   DiagnoseResponse,
   Directive,
   EvalReport,
@@ -180,6 +183,9 @@ export const api = {
     URL.revokeObjectURL(url);
   },
   evalLatest: () => request<EvalReport>("/api/eval/latest"),
+  demoStatus: () => request<DemoStatus>("/api/demo"),
+  saveCheckpoint: (label: string) => request<DemoCheckpoint>("/api/demo/checkpoint", { method: "POST", json: { label } }),
+  resetDemo: () => request<DemoResetResult>("/api/demo/reset", { method: "POST", json: { confirm: true } }),
 };
 
 export function formatDate(iso: string | null | undefined): string {
