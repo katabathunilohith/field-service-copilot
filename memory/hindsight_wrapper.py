@@ -845,16 +845,24 @@ class HindsightMemory:
     async def health(self, bank_id: str) -> dict[str, Any]:
         if not self.enabled:
             return {"reachable": False, "reason": "HINDSIGHT_API_KEY not configured"}
+        # Reachability comes from the cheap /health endpoint; bank stats can be slow (they took
+        # over 6 s during startup work) and are a nice-to-have, so they never decide "reachable".
         start = time.perf_counter()
         try:
-            stats = await self._request("GET", f"{API_PREFIX}/{bank_id}/stats", None, 6.0)
+            await self._request("GET", "/health", None, 5.0)
         except (TimeoutError, HindsightError) as exc:
-            return {"reachable": False, "reason": str(exc)[:200], "latency_ms": _elapsed_ms(start)}
+            return {"reachable": False, "reason": str(exc)[:200] or "health check timed out after 5s",
+                    "latency_ms": _elapsed_ms(start)}
+        latency = _elapsed_ms(start)
+        try:
+            stats = await self._request("GET", f"{API_PREFIX}/{bank_id}/stats", None, 8.0)
+        except (TimeoutError, HindsightError):
+            stats = None
         return {
             "reachable": True,
-            "latency_ms": _elapsed_ms(start),
+            "latency_ms": latency,
             "stats": {k: stats.get(k) for k in ("total_nodes", "total_documents", "total_observations",
-                                                "pending_operations", "last_memory_write_at")},
+                                                "pending_operations", "last_memory_write_at")} if stats else None,
         }
 
 

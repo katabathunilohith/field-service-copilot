@@ -60,7 +60,7 @@ export interface Health {
     reachable: boolean;
     reason?: string;
     latency_ms?: number;
-    stats?: { total_nodes: number; total_documents: number; total_observations: number; pending_operations: number };
+    stats?: { total_nodes: number; total_documents: number; total_observations: number; pending_operations: number } | null;
   };
   llm: { available: boolean; model: string; baseline_model: string; rate: Record<string, { limit_tpm: number; available_tokens: number }> };
   outbox: OutboxStatus;
